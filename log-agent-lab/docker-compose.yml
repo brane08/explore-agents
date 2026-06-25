@@ -1,0 +1,40 @@
+services:
+  mock-log-api:
+    build:
+      context: ./mcp_server
+    command: ["uvicorn", "mcp_server.log_mock.api:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    networks:
+      - lab
+
+  mcp-server:
+    build:
+      context: ./mcp_server
+    environment:
+      # Standby: tools currently use in-process _CORPUS; this env var is reserved
+      # for a future HTTP-backed tool variant that reads from mock-log-api directly.
+      MOCK_LOG_API_URL: "http://mock-log-api:8001"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mock-log-api
+    networks:
+      - lab
+
+  agent-app:
+    build:
+      context: ./agent_app
+    environment:
+      MCP_SERVER_URL: "http://mcp-server:8000"
+      AGENT_MODEL: "${AGENT_MODEL:-claude-sonnet-4-6}"
+    ports:
+      - "8002:8002"
+    depends_on:
+      - mcp-server
+    networks:
+      - lab
+
+networks:
+  lab:
+    driver: bridge
