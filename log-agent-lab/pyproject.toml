@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["mcp_server", "agent_app"]
+
+[tool.uv]
+dev-dependencies = ["pytest>=8.0", "httpx>=0.27"]
