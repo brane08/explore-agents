@@ -1,4 +1,4 @@
-from agent_app.orchestrator.tool_spec import AgentSpec, ToolSpec
+from orchestrator.tool_spec import AgentSpec, ToolSpec
 
 _AGENT_NAME = "orch-b1-agent"
 

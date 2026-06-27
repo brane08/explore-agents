@@ -1,6 +1,6 @@
 import json
 from fastmcp import Client
-from agent_app.orchestrator.tool_spec import ToolSpec
+from orchestrator.tool_spec import ToolSpec
 
 
 class MCPClient:

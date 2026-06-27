@@ -1,7 +1,7 @@
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from agent_app.mcp_client import MCPClient
+from mcp_client import MCPClient
 
 
 def _make_tool(name, description, schema=None):
@@ -35,7 +35,7 @@ async def test_list_tools_returns_tool_specs(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("agent_app.mcp_client.Client", return_value=mock_client):
+    with patch("mcp_client.Client", return_value=mock_client):
         tools = await client.list_tools()
 
     assert len(tools) == 2
@@ -51,7 +51,7 @@ async def test_list_tools_input_schema_preserved(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("agent_app.mcp_client.Client", return_value=mock_client):
+    with patch("mcp_client.Client", return_value=mock_client):
         tools = await client.list_tools()
 
     assert tools[0].input_schema == {"type": "object", "properties": {}}
@@ -65,7 +65,7 @@ async def test_call_tool_returns_parsed_result(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("agent_app.mcp_client.Client", return_value=mock_client):
+    with patch("mcp_client.Client", return_value=mock_client):
         result = await client.call_tool("es_search", {"query_level": "ERROR", "size": 5})
 
     assert result == {"hits": [], "total": 0}
@@ -78,6 +78,6 @@ async def test_call_tool_server_error_raises(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("agent_app.mcp_client.Client", return_value=mock_client):
+    with patch("mcp_client.Client", return_value=mock_client):
         with pytest.raises(Exception, match="MCP server error"):
             await client.call_tool("es_search", {})

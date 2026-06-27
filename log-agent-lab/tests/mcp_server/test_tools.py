@@ -1,7 +1,7 @@
 import pytest
-from mcp_server.tools.es_search import es_search
-from mcp_server.tools.es_aggregate import es_aggregate
-from mcp_server.tools.field_stats import field_stats
+from tools.es_search import es_search
+from tools.es_aggregate import es_aggregate
+from tools.field_stats import field_stats
 
 def test_es_search_returns_hits():
     result = es_search(query_level=None, size=3)

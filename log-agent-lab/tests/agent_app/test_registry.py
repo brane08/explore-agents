@@ -1,6 +1,6 @@
 import pytest
-from agent_app.orchestrator.tool_spec import AgentSpec, ToolSpec
-from agent_app.orchestrator.registry import AgentRegistry
+from orchestrator.tool_spec import AgentSpec, ToolSpec
+from orchestrator.registry import AgentRegistry
 
 _SPEC = AgentSpec(
     name="orch-b1-agent",

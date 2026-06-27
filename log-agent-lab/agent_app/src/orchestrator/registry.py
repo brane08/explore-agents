@@ -1,4 +1,4 @@
-from agent_app.orchestrator.tool_spec import AgentSpec
+from orchestrator.tool_spec import AgentSpec
 
 
 class AgentRegistry:

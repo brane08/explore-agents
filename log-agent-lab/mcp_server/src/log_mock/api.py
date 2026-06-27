@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-from mcp_server.log_mock.generator import generate_logs
+from log_mock.generator import generate_logs
 
 app = FastAPI(title="Mock Log API")
 

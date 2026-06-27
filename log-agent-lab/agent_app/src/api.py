@@ -2,9 +2,9 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from agent_app.mcp_client import MCPClient
-from agent_app.orchestrator.factory import assemble_agent
-from agent_app.orchestrator.registry import AgentRegistry
+from mcp_client import MCPClient
+from orchestrator.factory import assemble_agent
+from orchestrator.registry import AgentRegistry
 
 _registry = AgentRegistry()
 _mcp_client: MCPClient | None = None

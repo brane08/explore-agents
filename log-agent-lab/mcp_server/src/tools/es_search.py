@@ -1,4 +1,4 @@
-from mcp_server.log_mock.corpus import CORPUS as _CORPUS
+from log_mock.corpus import CORPUS as _CORPUS
 
 
 def es_search(query_level: str | None = None, size: int = 10) -> dict:

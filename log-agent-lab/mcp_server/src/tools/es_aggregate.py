@@ -1,5 +1,5 @@
 from collections import Counter
-from mcp_server.log_mock.corpus import CORPUS as _CORPUS
+from log_mock.corpus import CORPUS as _CORPUS
 _ALLOWED_FIELDS = {"level", "service", "status_code"}
 
 

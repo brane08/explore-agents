@@ -1,6 +1,6 @@
 import pytest
-from agent_app.orchestrator.tool_spec import ToolSpec, AgentSpec
-from agent_app.orchestrator.factory import match_tools, assemble_agent
+from orchestrator.tool_spec import ToolSpec, AgentSpec
+from orchestrator.factory import match_tools, assemble_agent
 
 _FAKE_POOL = [
     ToolSpec(name="es_search", description="Search logs", input_schema={"type": "object"}),

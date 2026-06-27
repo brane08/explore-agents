@@ -1,5 +1,5 @@
 from collections import Counter
-from mcp_server.log_mock.corpus import CORPUS as _CORPUS
+from log_mock.corpus import CORPUS as _CORPUS
 _NUMERIC_FIELDS = {"duration_ms", "status_code"}
 _CATEGORICAL_FIELDS = {"level", "service", "message"}
 _ALL_FIELDS = _NUMERIC_FIELDS | _CATEGORICAL_FIELDS

@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from mcp_server.log_mock.api import app
+from log_mock.api import app
 
 client = TestClient(app)
 

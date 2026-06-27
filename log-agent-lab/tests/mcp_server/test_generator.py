@@ -1,5 +1,5 @@
 import pytest
-from mcp_server.log_mock.generator import generate_logs
+from log_mock.generator import generate_logs
 
 def test_generate_returns_count():
     logs = generate_logs(count=10)

@@ -2,7 +2,7 @@ services:
   mock-log-api:
     build:
       context: ./mcp_server
-    command: ["uvicorn", "mcp_server.log_mock.api:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["uvicorn", "src.log_mock.api:app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"
     networks:

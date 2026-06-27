@@ -4,4 +4,4 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml ./
 COPY src ./src
 RUN uv pip install --system .
-CMD ["uvicorn", "agent_app.api:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8002"]
