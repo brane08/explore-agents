@@ -10,8 +10,10 @@ timeout, crash, and clean exit are all represented, never raised.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -35,14 +37,19 @@ def run_in_sandbox(
     """
     Run agent_path as a subprocess using the current interpreter.
 
-    The subprocess inherits a clean env with only MCP_SERVER_URL and
-    PYTHONPATH set; extra_env can inject additional variables for testing.
+    The subprocess inherits a clean env with MCP_SERVER_URL, PYTHONPATH
+    (agent dir + venv site-packages), and minimal system vars.
+    extra_env can inject additional variables for testing.
     """
-    import os
+    # Include venv site-packages so the generated agent can import fastmcp/langgraph.
+    # sysconfig paths are derived from sys.executable, so they're always correct
+    # regardless of whether the venv is activated in the shell.
+    _sp = {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")} - {None}
+    pythonpath = os.pathsep.join([str(agent_path.parent)] + sorted(_sp))
 
     env = {
         "MCP_SERVER_URL": mcp_server_url,
-        "PYTHONPATH": str(agent_path.parent),
+        "PYTHONPATH": pythonpath,
         "PATH": os.environ.get("PATH", ""),
         # propagate HOME so fastmcp cache dirs resolve
         "HOME": os.environ.get("HOME", ""),

@@ -37,14 +37,16 @@ class CaseResult:
     error: str | None = None
 
 
-def _parse_mcp_result(raw: list) -> dict:
-    for block in raw:
+def _parse_mcp_result(raw) -> dict:
+    blocks = raw.content if hasattr(raw, "content") else raw
+    for block in blocks:
         if hasattr(block, "text"):
             try:
                 return json.loads(block.text)
             except (json.JSONDecodeError, TypeError):
-                return {"text": block.text}
-    return {"result": str(raw)}
+                continue
+    text_blocks = [b.text for b in blocks if hasattr(b, "text")]
+    return {"text": text_blocks[0]} if text_blocks else {"result": str(raw)}
 
 
 def _all_hits_are_error(result: dict) -> bool:
@@ -105,15 +107,28 @@ async def run_cases(
 ) -> list[CaseResult]:
     """Call each selected case directly against mcp_server and return results."""
     url = mcp_server_url.rstrip("/") + "/mcp"
-    selected = [CASE_INDEX[cid] for cid in case_ids] if case_ids else CASES
+    if case_ids is not None:
+        if not case_ids:
+            raise ValueError("case_ids must not be empty; pass None to run all cases")
+        unknown = [cid for cid in case_ids if cid not in CASE_INDEX]
+        if unknown:
+            raise ValueError(f"Unknown case IDs: {unknown}")
+        selected = [CASE_INDEX[cid] for cid in case_ids]
+    else:
+        selected = list(CASES)
     results: list[CaseResult] = []
-    async with Client(url) as client:
+    try:
+        async with Client(url) as client:
+            for case in selected:
+                try:
+                    raw = await client.call_tool(case.tool_name, case.arguments)
+                    parsed = _parse_mcp_result(raw)
+                    passed = case.check(parsed)
+                    results.append(CaseResult(case_id=case.id, passed=passed, result=parsed))
+                except Exception as exc:
+                    results.append(CaseResult(case_id=case.id, passed=False, result=None, error=str(exc)))
+    except Exception as exc:
         for case in selected:
-            try:
-                raw = await client.call_tool(case.tool_name, case.arguments)
-                parsed = _parse_mcp_result(raw)
-                passed = case.check(parsed)
-                results.append(CaseResult(case_id=case.id, passed=passed, result=parsed))
-            except Exception as exc:
-                results.append(CaseResult(case_id=case.id, passed=False, result=None, error=str(exc)))
+            if not any(r.case_id == case.id for r in results):
+                results.append(CaseResult(case_id=case.id, passed=False, result=None, error=f"connection failed: {exc}"))
     return results

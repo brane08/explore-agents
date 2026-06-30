@@ -22,6 +22,7 @@ generated file as iteration_<n>_prompt.txt for post-run inspection.
 
 from __future__ import annotations
 
+import threading
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,7 @@ def run_loop(
     generator_fn: GeneratorFunc | None = None,
     sandbox_timeout: int = 30,
     generated_base_dir: Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> LoopReport:
     """
     Execute the B2a generate→sandbox→evaluate loop.
@@ -92,6 +94,13 @@ def run_loop(
     feedback = ""
 
     for iteration in range(spec.max_iterations):
+        if cancel_event and cancel_event.is_set():
+            return LoopReport(
+                stopped_reason="cancelled",
+                iterations_run=iteration,
+                final_score=trend[-1] if trend else 0.0,
+                trend=trend, records=records,
+            )
         gen_result: GenerationResult | None = None
         sandbox: SandboxResult | None = None
         eval_result: EvalResult | None = None

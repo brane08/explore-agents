@@ -35,6 +35,34 @@ services:
     networks:
       - lab
 
+  b2a-app:
+    build:
+      context: ./b2a_app
+    environment:
+      MCP_SERVER_URL: "http://mcp-server:8000"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      B2A_MODEL: "${AGENT_MODEL:-claude-sonnet-4-6}"
+    ports:
+      - "8003:8003"
+    depends_on:
+      - mcp-server
+    networks:
+      - lab
+
+  agentflow-ui:
+    build:
+      context: ./agentflow_ui
+    environment:
+      AGENT_APP_URL: "http://agent-app:8002"
+      B2A_APP_URL: "http://b2a-app:8003"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - agent-app
+      - b2a-app
+    networks:
+      - lab
+
 networks:
   lab:
     driver: bridge

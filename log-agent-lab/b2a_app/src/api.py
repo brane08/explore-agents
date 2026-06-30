@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,11 +11,11 @@ from dotenv import load_dotenv
 # Load .env from the workspace root (log-agent-lab/) if present
 load_dotenv(Path(__file__).parents[3] / ".env")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastmcp import Client
 from pydantic import BaseModel, Field
 
-from eval_suite.log_analysis_cases import CASES
+from eval_suite.log_analysis_cases import CASE_INDEX, CASES
 from loop.orchestrator import LoopReport, run_loop
 from loop.spec import EvalCaseSpec, TaskSpec, ToolSchema
 
@@ -91,19 +93,18 @@ def health() -> dict:
 
 
 @app.post("/run-loop", response_model=RunLoopResponse)
-async def run_loop_endpoint(req: RunLoopRequest) -> RunLoopResponse:
+async def run_loop_endpoint(req: RunLoopRequest, request: Request) -> RunLoopResponse:
     if not _available_tools:
         raise HTTPException(status_code=503, detail="MCP server tools not loaded — is mcp_server running?")
 
-    known_ids = {c.id for c in CASES}
-    unknown = [cid for cid in req.eval_case_ids if cid not in known_ids]
+    unknown = [cid for cid in req.eval_case_ids if cid not in CASE_INDEX]
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown eval case ids: {unknown}")
 
     eval_cases = [
         EvalCaseSpec(id=c.id, tool_name=c.tool_name, arguments=c.arguments)
-        for c in CASES
-        if c.id in req.eval_case_ids
+        for cid in req.eval_case_ids
+        for c in [CASE_INDEX[cid]]
     ]
 
     mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
@@ -116,7 +117,23 @@ async def run_loop_endpoint(req: RunLoopRequest) -> RunLoopResponse:
         max_iterations=req.max_iterations,
     )
 
-    report: LoopReport = run_loop(spec, sandbox_timeout=req.sandbox_timeout)
+    cancel_event = threading.Event()
+
+    async def _watch_disconnect() -> None:
+        while not cancel_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                return
+            await asyncio.sleep(1)
+
+    watcher = asyncio.create_task(_watch_disconnect())
+    try:
+        report: LoopReport = await asyncio.to_thread(
+            run_loop, spec, sandbox_timeout=req.sandbox_timeout, cancel_event=cancel_event
+        )
+    finally:
+        cancel_event.set()
+        watcher.cancel()
 
     last_case_results: list[CaseResultOut] = []
     if report.records:

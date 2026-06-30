@@ -1,5 +1,10 @@
 [tool.uv.workspace]
-members = ["mcp_server", "agent_app", "b2a_app"]
+members = ["mcp_server", "agent_app", "b2a_app", "agentflow_ui"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires live MCP server subprocess (run with -m integration)",
+]
 
 [tool.uv]
 dev-dependencies = [

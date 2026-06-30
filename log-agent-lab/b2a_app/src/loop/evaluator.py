@@ -66,7 +66,7 @@ def evaluate(
         outputs: dict = json.loads(sandbox.stdout)
     except (json.JSONDecodeError, ValueError) as exc:
         cr = tuple(CaseResult(c.id, False, f"stdout not valid JSON: {exc}") for c in eval_cases)
-        return EvalResult(passed=False, score=0.0, case_results=cr, stop_reason="bad json")
+        return EvalResult(passed=False, score=0.0, case_results=cr, stop_reason="bad_json")
 
     # --- run checks ---
     results: list[CaseResult] = []
