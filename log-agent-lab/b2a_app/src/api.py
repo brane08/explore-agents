@@ -16,36 +16,52 @@ from fastmcp import Client
 from pydantic import BaseModel, Field
 
 from eval_suite.log_analysis_cases import CASE_INDEX, CASES
+from eval_suite.reasoning_tasks import HELDOUT_TASKS, TASK_INDEX
+from loop.llm import select_completer
 from loop.orchestrator import LoopReport, run_loop
+from loop.reasoning import SuiteReport, run_reasoning_suite
+from loop.skills import load_skill_tools
 from loop.spec import EvalCaseSpec, TaskSpec, ToolSchema
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — fetch available tools from MCP server once at startup
+# Lifespan — discover available tools once at startup.
+# Skills directory first (works with no live MCP registry); MCP fallback.
 # ---------------------------------------------------------------------------
 
 _available_tools: list[ToolSchema] = []
 
 
+def _skills_dir() -> Path:
+    default = Path(__file__).parents[2] / "skills"  # log-agent-lab/skills
+    return Path(os.environ.get("B2A_SKILLS_DIR", str(default)))
+
+
+async def _discover_from_mcp() -> list[ToolSchema]:
+    mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:8000").rstrip("/") + "/mcp"
+    async with Client(mcp_url) as client:
+        tools = await client.list_tools()
+    return [
+        ToolSchema(
+            name=t.name,
+            description=t.description or "",
+            input_schema=t.inputSchema.model_dump()
+            if hasattr(t.inputSchema, "model_dump")
+            else dict(t.inputSchema),
+        )
+        for t in tools
+    ]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _available_tools
-    mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:8000").rstrip("/") + "/mcp"
-    try:
-        async with Client(mcp_url) as client:
-            tools = await client.list_tools()
-        _available_tools = [
-            ToolSchema(
-                name=t.name,
-                description=t.description or "",
-                input_schema=t.inputSchema.model_dump()
-                if hasattr(t.inputSchema, "model_dump")
-                else dict(t.inputSchema),
-            )
-            for t in tools
-        ]
-    except Exception:
-        _available_tools = []
+    _available_tools = load_skill_tools(_skills_dir())
+    if not _available_tools:
+        try:
+            _available_tools = await _discover_from_mcp()
+        except Exception:
+            _available_tools = []
     yield
 
 
@@ -92,10 +108,19 @@ def health() -> dict:
     return {"status": "ok", "tools_loaded": len(_available_tools)}
 
 
+@app.get("/tools")
+def list_tools() -> dict:
+    """List the discovered tool catalog (from the skills manifest or MCP)."""
+    return {"tools": [t.model_dump() for t in _available_tools]}
+
+
 @app.post("/run-loop", response_model=RunLoopResponse)
 async def run_loop_endpoint(req: RunLoopRequest, request: Request) -> RunLoopResponse:
     if not _available_tools:
-        raise HTTPException(status_code=503, detail="MCP server tools not loaded — is mcp_server running?")
+        raise HTTPException(
+            status_code=503,
+            detail="No tools available — populate the skills directory or start mcp_server.",
+        )
 
     unknown = [cid for cid in req.eval_case_ids if cid not in CASE_INDEX]
     if unknown:
@@ -151,4 +176,92 @@ async def run_loop_endpoint(req: RunLoopRequest, request: Request) -> RunLoopRes
         trend=report.trend,
         case_results=last_case_results,
         final_agent_path=str(report.final_path) if report.final_path else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# B2b — reasoning over held-out tasks
+# ---------------------------------------------------------------------------
+
+# Indirection so tests can inject a deterministic completer.
+_completer_factory = select_completer
+
+
+class RunReasoningRequest(BaseModel):
+    task_ids: list[str] = Field(
+        default_factory=lambda: [t.id for t in HELDOUT_TASKS],
+        description="Subset of held-out task ids to run. Defaults to all.",
+    )
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    sandbox_timeout: int = Field(default=60, ge=5, le=120)
+
+
+class TaskReportOut(BaseModel):
+    task_id: str
+    passed: bool
+    attempts: int
+    detail: str
+
+
+class RunReasoningResponse(BaseModel):
+    passed: int
+    total: int
+    pass_rate: float
+    answerable_passed: int
+    answerable_total: int
+    gaps_detected: int
+    gap_total: int
+    missing_capabilities: list[str]
+    tasks: list[TaskReportOut]
+
+
+@app.post("/run-reasoning", response_model=RunReasoningResponse)
+def run_reasoning_endpoint(req: RunReasoningRequest) -> RunReasoningResponse:
+    if not _available_tools:
+        raise HTTPException(
+            status_code=503,
+            detail="No tools available — populate the skills directory or start mcp_server.",
+        )
+
+    unknown = [tid for tid in req.task_ids if tid not in TASK_INDEX]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown task ids: {unknown}")
+
+    completer = _completer_factory()
+    if completer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM provider configured — reasoning tasks require one "
+                   "(set B2A_LLM_PROVIDER / credentials).",
+        )
+
+    mcp_url = os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
+    base_dir = Path(__file__).parents[2] / "generated" / "reasoning"
+    report: SuiteReport = run_reasoning_suite(
+        [TASK_INDEX[tid] for tid in req.task_ids],
+        _available_tools,
+        mcp_url,
+        completer,
+        base_dir,
+        max_attempts=req.max_attempts,
+        sandbox_timeout=req.sandbox_timeout,
+    )
+    return RunReasoningResponse(
+        passed=report.passed,
+        total=report.total,
+        pass_rate=report.pass_rate,
+        answerable_passed=report.answerable_passed,
+        answerable_total=report.answerable_total,
+        gaps_detected=report.gaps_detected,
+        gap_total=report.gap_total,
+        missing_capabilities=report.missing_capabilities,
+        tasks=[
+            TaskReportOut(
+                task_id=r.task_id,
+                passed=r.passed,
+                attempts=r.attempts,
+                detail=r.results[-1].detail if r.results else "",
+            )
+            for r in report.reports
+        ],
     )

@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "es_aggregate",
+      "description": "Aggregate log records by a categorical field.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "description": "Categorical field to group by (level, service, or status_code)."
+          },
+          "metric": {
+            "type": "string",
+            "description": "Aggregation metric. Only \"count\" is supported.",
+            "default": "count"
+          }
+        },
+        "required": [
+          "group_by"
+        ]
+      }
+    },
+    {
+      "name": "es_search",
+      "description": "Search log records, optionally filtered by log level.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query_level": {
+            "type": "string",
+            "description": "Optional log level to filter by (e.g. ERROR, WARN, INFO)."
+          },
+          "size": {
+            "type": "integer",
+            "description": "Maximum number of hits to return.",
+            "default": 10
+          }
+        }
+      }
+    },
+    {
+      "name": "field_stats",
+      "description": "Summary statistics for a single field across all log records.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Field to summarise (duration_ms, status_code, level, service, message)."
+          }
+        },
+        "required": [
+          "field"
+        ]
+      }
+    }
+  ]
+}

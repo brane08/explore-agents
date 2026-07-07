@@ -5,8 +5,11 @@ Produces a candidate LangGraph agent as a Python source file, validates it
 with ast.parse, and writes it to disk.
 
 Two generator backends:
-  stub_generate      — template-based, no API key needed, used by default
-  anthropic_generate — real Claude call; swap in when ANTHROPIC_API_KEY is set
+  stub_generate — template-based, no API key needed, used by default
+  llm backend   — real model call through a provider-neutral Completer
+                  (see loop/llm.py); works with Anthropic, OpenAI-compatible,
+                  or any injected callable. Selected automatically when a
+                  provider is configured.
 
 generate_candidate() is the public entry point used by orchestrator.py.
 It calls whichever backend is passed, then validates + writes the file.
@@ -16,12 +19,12 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from loop.llm import Completer, select_completer
 from loop.spec import TaskSpec, ToolSchema
 
 # Type alias for any backend: (spec, feedback) -> source code string
@@ -41,14 +44,23 @@ class GenerationResult:
 # ---------------------------------------------------------------------------
 
 def _render_case_node(case_id: str, tool_name: str, arguments: dict) -> str:
-    """Render one async LangGraph node that executes one eval case."""
+    """Render one async LangGraph node that executes one eval case.
+
+    The tool call is wrapped so a failure records an error result instead of
+    crashing the whole agent — a partial/failed run then surfaces as an eval
+    failure the loop can give feedback on and retry, rather than a hard crash.
+    """
     args_repr = json.dumps(arguments)
     node_name = f"node_{case_id}"
     lines = [
         f"async def {node_name}(state: AgentState) -> AgentState:",
-        f"    async with Client(MCP_URL) as client:",
-        f"        raw = await client.call_tool({tool_name!r}, {args_repr})",
-        f"    state['results'][{case_id!r}] = _parse_mcp_result(raw)",
+        f"    # eval case {case_id!r} → MCP tool {tool_name!r}",
+        f"    try:",
+        f"        async with Client(MCP_URL) as client:",
+        f"            raw = await client.call_tool({tool_name!r}, {args_repr})",
+        f"        state['results'][{case_id!r}] = _parse_mcp_result(raw)",
+        f"    except Exception as exc:",
+        f"        state['results'][{case_id!r}] = {{'error': f'{{type(exc).__name__}}: {{exc}}'}}",
         f"    return state",
     ]
     return "\n".join(lines)
@@ -140,16 +152,11 @@ def stub_generate(spec: TaskSpec, feedback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Anthropic backend — real Claude call (needs ANTHROPIC_API_KEY)
+# LLM backend — provider-neutral, driven by a Completer (see loop/llm.py)
 # ---------------------------------------------------------------------------
 
-def anthropic_generate(spec: TaskSpec, feedback: str) -> tuple[str, str]:
-    """Call Claude to generate a LangGraph agent. Requires ANTHROPIC_API_KEY."""
-    try:
-        import anthropic
-    except ImportError as exc:
-        raise RuntimeError("anthropic package not installed") from exc
-
+def _build_prompt(spec: TaskSpec, feedback: str) -> str:
+    """Provider-neutral prompt: plain text, no SDK- or vendor-specific shape."""
     tool_schemas = json.dumps(
         [{"name": t.name, "description": t.description, "input_schema": t.input_schema}
          for t in spec.available_tools],
@@ -157,7 +164,7 @@ def anthropic_generate(spec: TaskSpec, feedback: str) -> tuple[str, str]:
     )
     feedback_section = f"\n\nPrevious attempt failed. Feedback:\n{feedback}" if feedback.strip() else ""
 
-    prompt = textwrap.dedent(f"""\
+    return textwrap.dedent(f"""\
         Generate a complete, runnable Python file implementing a LangGraph agent named
         "{spec.agent_name}" that accomplishes the following task:
 
@@ -169,7 +176,11 @@ def anthropic_generate(spec: TaskSpec, feedback: str) -> tuple[str, str]:
           MCP_URL = os.environ.get("MCP_SERVER_URL", "{spec.mcp_server_url}").rstrip("/") + "/mcp"
         - Available tools (call them with these exact names and argument shapes):
         {tool_schemas}
+        - fastmcp's client.call_tool(...) returns a CallToolResult; read the text
+          from result.content (a list of blocks, each with a .text attribute).
         - Store each tool's result in state["results"][<tool_name>] as a parsed dict.
+        - Wrap each tool call so a failure records {{"error": "..."}} for that key
+          instead of raising — the agent must still print all results and exit 0.
         - At the end of main(), print json.dumps(state["results"]) to stdout.
         - The file must be self-contained and runnable as: python agent.py
         - No placeholders, no TODO comments — complete working code only.
@@ -178,18 +189,21 @@ def anthropic_generate(spec: TaskSpec, feedback: str) -> tuple[str, str]:
         Return ONLY the Python source code, no markdown fences, no explanation.
     """)
 
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model=os.environ.get("B2A_MODEL", "claude-sonnet-4-6"),
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text
-    # strip accidental markdown fences
+
+def _strip_fences(raw: str) -> str:
+    """Strip accidental markdown code fences from a model's response."""
     if raw.strip().startswith("```"):
         lines = raw.strip().splitlines()
         raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    return prompt, raw
+    return raw
+
+
+def make_llm_backend(complete: Completer) -> GeneratorFunc:
+    """Wrap any Completer into a GeneratorFunc the loop can call."""
+    def backend(spec: TaskSpec, feedback: str) -> tuple[str, str]:
+        prompt = _build_prompt(spec, feedback)
+        return prompt, _strip_fences(complete(prompt))
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +211,11 @@ def anthropic_generate(spec: TaskSpec, feedback: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def _select_backend() -> GeneratorFunc:
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return anthropic_generate
-    return stub_generate
+    """Use a configured LLM provider if one is available; else the stub."""
+    completer = select_completer()
+    if completer is None:
+        return stub_generate
+    return make_llm_backend(completer)
 
 
 def generate_candidate(

@@ -19,6 +19,13 @@ def _make_text_block(text):
     return block
 
 
+def _make_result(blocks):
+    # Mimic fastmcp CallToolResult: .content holds the content blocks
+    result = MagicMock()
+    result.content = blocks
+    return result
+
+
 @pytest.fixture
 def client():
     return MCPClient(base_url="http://test-mcp")
@@ -61,7 +68,7 @@ async def test_list_tools_input_schema_preserved(client):
 async def test_call_tool_returns_parsed_result(client):
     payload = json.dumps({"hits": [], "total": 0})
     mock_client = AsyncMock()
-    mock_client.call_tool.return_value = [_make_text_block(payload)]
+    mock_client.call_tool.return_value = _make_result([_make_text_block(payload)])
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 

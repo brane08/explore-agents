@@ -5,7 +5,6 @@ Requires mcp_server running at MCP_SERVER_URL (default http://localhost:8000).
 These tests establish ground truth before any generated agent exists.
 """
 
-import os
 import pytest
 from eval_suite.log_analysis_cases import (
     CASES,
@@ -16,8 +15,6 @@ from eval_suite.log_analysis_cases import (
     _has_service_buckets,
     run_cases,
 )
-
-MCP_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000")
 
 
 # --- unit tests for check functions (no network) ---
@@ -73,26 +70,29 @@ def test_four_cases_defined():
     assert len(CASES) == 4
 
 
-# --- network tests: cases must pass against real mcp_server ---
+# --- network tests: cases must pass against real mcp_server (opt-in: -m e2e) ---
 
+@pytest.mark.e2e
 @pytest.mark.anyio
-async def test_run_cases_all_pass_against_mcp_server():
-    results = await run_cases(MCP_URL)
+async def test_run_cases_all_pass_against_mcp_server(live_mcp_url):
+    results = await run_cases(live_mcp_url)
     failures = [r for r in results if not r.passed]
     assert failures == [], f"Cases failed: {[(r.case_id, r.error) for r in failures]}"
 
 
+@pytest.mark.e2e
 @pytest.mark.anyio
-async def test_run_cases_subset_by_id():
-    results = await run_cases(MCP_URL, case_ids=["search_error_level", "field_stats_numeric"])
+async def test_run_cases_subset_by_id(live_mcp_url):
+    results = await run_cases(live_mcp_url, case_ids=["search_error_level", "field_stats_numeric"])
     assert len(results) == 2
     assert all(r.passed for r in results)
 
 
+@pytest.mark.e2e
 @pytest.mark.anyio
-async def test_check_functions_correctly_reject_wrong_data():
+async def test_check_functions_correctly_reject_wrong_data(live_mcp_url):
     """Deliberately pass wrong data to check functions to confirm they can fail."""
-    results = await run_cases(MCP_URL, case_ids=["search_error_level"])
+    results = await run_cases(live_mcp_url, case_ids=["search_error_level"])
     # swap in wrong data — the check must reject it
     wrong = CaseResult(case_id="search_error_level", passed=False,
                        result={"hits": [{"level": "INFO"}]})

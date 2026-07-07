@@ -8,7 +8,11 @@ dependencies = [
     "httpx>=0.27",
     "pydantic>=2.7",
     "fastmcp>=3.4.2",
+    "skills-kit",
 ]
+
+[tool.uv.sources]
+skills-kit = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
