@@ -1,0 +1,3 @@
+# Orchestrator-owned trust ledger. Written ONLY by tooling/certify or recorded human
+# override. Append-only. Key: (id, version, model_profile). See docs/CATALOG.md §7.
+records: []
