@@ -17,7 +17,7 @@ from loop.skills import (
     load_skill_tools,
 )
 
-_REPO_SKILLS = Path(__file__).parents[2] / "skills"
+_CATALOG_ROOT = Path(__file__).parents[3]  # platform catalog root
 
 _SKILL_MD = """\
 ---
@@ -77,23 +77,34 @@ def test_missing_name_raises(tmp_path):
         load_skill_tools(tmp_path)
 
 
-# --- the repo's real skills directory is the source of truth for the loop ---
+# --- the platform catalog root is the source of truth for the loop ---
 
-def test_repo_skills_cover_every_eval_case():
-    tools = load_skill_tools(_REPO_SKILLS)
+def test_catalog_covers_every_eval_case():
+    tools = load_skill_tools(_CATALOG_ROOT)
     names = {t.name for t in tools}
     assert names == {"es_search", "es_aggregate", "field_stats"}
-    # every eval case's tool has a skill definition
+    # every eval case's tool has a catalog definition
     for case in CASES:
         assert case.tool_name in names
 
 
-def test_repo_manifest_in_sync_with_folders():
-    """Guard against a stale committed manifest.json — regenerate with
-    `python -m loop.skills` if this fails."""
-    committed = json.loads((_REPO_SKILLS / MANIFEST).read_text(encoding="utf-8"))
-    rebuilt = build_manifest(_load_from_folders(_REPO_SKILLS))
-    assert committed == rebuilt
+def test_catalog_loads_mirrored_mcp_snapshot(tmp_path):
+    """A catalog root mixes skills/*/SKILL.md with mcp/*/schema.snapshot.json."""
+    _write_skill(tmp_path / "skills", "my_tool", _SKILL_MD)
+    snap = tmp_path / "mcp" / "mirrored" / "schema.snapshot.json"
+    snap.parent.mkdir(parents=True)
+    snap.write_text(json.dumps({
+        "name": "mirrored",
+        "description": "A mirrored MCP tool.",
+        "inputSchema": {"type": "object", "properties": {"x": {"type": "string"}}},
+    }), encoding="utf-8")
+    tools = {t.name: t for t in load_skill_tools(tmp_path)}
+    assert set(tools) == {"my_tool", "mirrored"}
+    assert tools["mirrored"].input_schema["properties"] == {"x": {"type": "string"}}
+    # catalog roots never read a manifest.json fast path
+    (tmp_path / MANIFEST).write_text(
+        json.dumps({"version": 1, "tools": []}), encoding="utf-8")
+    assert len(load_skill_tools(tmp_path)) == 2
 
 
 def test_load_prefers_manifest_over_folders(tmp_path):

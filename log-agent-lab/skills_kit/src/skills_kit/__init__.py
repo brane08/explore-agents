@@ -12,6 +12,12 @@ implementation, no duplication.
 
 Format & regeneration live with each app's thin wrapper; the authoring source
 is always the SKILL.md folders — manifest.json is a generated fast path.
+
+A platform **catalog root** (docs/CATALOG.md §3 — has `skills/` and/or `mcp/`
+subdirectories) is also accepted: skills load from `skills/<id>/SKILL.md` and
+mirrored MCP tools from `mcp/<id>/schema.snapshot.json`. The catalog's
+aggregate artifact is `catalog.lock.yaml` (tooling/lockbuild), so no
+manifest.json is read at a catalog root.
 """
 from __future__ import annotations
 
@@ -76,13 +82,43 @@ def load_dicts_from_manifest(manifest_path: Path) -> list[dict]:
     return list(data.get("tools", []))
 
 
-def load_tool_dicts(skills_dir: Path) -> list[dict]:
-    """Discover tool dicts: manifest.json fast path, else SKILL.md folders.
+def _load_mcp_snapshot(snapshot: Path) -> dict:
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+    name = data.get("name")
+    if not name:
+        raise SkillFormatError(f"{snapshot}: snapshot missing 'name'")
+    return {
+        "name": name,
+        "description": data.get("description") or "",
+        "input_schema": data.get("inputSchema") or {},
+    }
 
+
+def _is_catalog_root(path: Path) -> bool:
+    return (path / "skills").is_dir() or (path / "mcp").is_dir()
+
+
+def _load_from_catalog(root: Path) -> list[dict]:
+    tools = _load_from_folders(root / "skills") if (root / "skills").is_dir() else []
+    if (root / "mcp").is_dir():
+        tools += [
+            _load_mcp_snapshot(snap)
+            for snap in sorted((root / "mcp").glob("*/schema.snapshot.json"))
+        ]
+    return tools
+
+
+def load_tool_dicts(skills_dir: Path) -> list[dict]:
+    """Discover tool dicts from a plain skills dir or a platform catalog root.
+
+    Plain dir: manifest.json fast path, else SKILL.md folders.
+    Catalog root: skills/*/SKILL.md + mcp/*/schema.snapshot.json.
     Returns ``[]`` when the directory is absent or holds no skills.
     """
     if not skills_dir.is_dir():
         return []
+    if _is_catalog_root(skills_dir):
+        return _load_from_catalog(skills_dir)
     manifest = skills_dir / MANIFEST
     if manifest.is_file():
         return load_dicts_from_manifest(manifest)

@@ -4,11 +4,13 @@ skills.py — b2a adapter over the shared skills_kit loader.
 skills_kit parses the SKILL.md folders / manifest.json into model-neutral
 dicts; here we adapt them to b2a's ToolSchema. See skills_kit for the format.
 
-Discovery prefers manifest.json (fast path for list calls), falls back to the
-SKILL.md folders, and the caller falls back to live MCP when this returns [].
-Regenerate the manifest after editing any SKILL.md:
+Discovery accepts a plain skills dir (manifest.json fast path, else SKILL.md
+folders) or the platform catalog root (skills/ + mirrored mcp/ snapshots);
+the caller falls back to live MCP when this returns [].
 
-    PYTHONPATH=b2a_app/src uv run python -m loop.skills            # default skills/
+Manifest regeneration applies to plain skills dirs only — the catalog root's
+aggregate is catalog.lock.yaml, built by tooling/lockbuild:
+
     PYTHONPATH=b2a_app/src uv run python -m loop.skills <dir>
 """
 from __future__ import annotations
@@ -48,6 +50,8 @@ def load_skill_tools(skills_dir: Path) -> list[ToolSchema]:
 if __name__ == "__main__":
     import sys
 
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parents[3] / "skills"
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: python -m loop.skills <skills-dir>")
+    target = Path(sys.argv[1])
     out = write_manifest(target)
     print(f"wrote {out} ({len(load_tool_dicts(target))} tools)")

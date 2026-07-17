@@ -15,7 +15,7 @@ _available_tools: list[ToolSpec] = []
 
 
 def _skills_dir() -> Path:
-    default = Path(__file__).parents[2] / "skills"  # log-agent-lab/skills
+    default = Path(__file__).parents[3]  # platform catalog root (skills/ + mcp/)
     return Path(os.environ.get("AGENT_SKILLS_DIR", str(default)))
 
 

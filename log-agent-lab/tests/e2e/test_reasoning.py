@@ -33,7 +33,7 @@ from loop.skills import load_skill_tools
 
 pytestmark = pytest.mark.e2e
 
-_SKILLS = Path(__file__).parents[2] / "skills"
+_SKILLS = Path(__file__).parents[3]  # platform catalog root
 
 
 def routing_oracle(mcp_url: str):

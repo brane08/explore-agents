@@ -1,0 +1,12 @@
+id: es_aggregate
+kind: skill
+version: 1.0.0
+routing_summary: Group mock log records by a categorical field (level, service or status_code) and count records per bucket.
+capability_tags:
+  - log-analysis
+  - read-only
+detail: >-
+  Groups the mock log corpus by group_by and counts records per bucket.
+  Returns {"group_by": ..., "metric": "count", "buckets": [{"key": ...,
+  "count": N}, ...]} sorted by descending count. group_by must be one of
+  level, service or status_code; metric only supports count.

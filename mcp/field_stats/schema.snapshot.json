@@ -1,0 +1,16 @@
+{
+  "description": "Return summary statistics for a single field across all log records.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "field": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "field"
+    ],
+    "type": "object"
+  },
+  "name": "field_stats"
+}

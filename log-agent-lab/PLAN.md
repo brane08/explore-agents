@@ -41,12 +41,14 @@ mcp_server (:8000)  --MCP/SSE-->  agent_app (:8002)   [B1: compose agent from mo
 
 ### Phase B2a — Self-owned code-gen loop ✅
 - Flat bounded loop: **generate → sandbox → evaluate → decide**.
-- **Tool discovery** is registry-independent: a local skills directory
-  (`skills/<tool>/SKILL.md`, YAML frontmatter → `ToolSchema`, `loop/skills.py`)
-  is used first, so the loop works with no live MCP registry; live MCP
-  `list_tools()` is the fallback (`B2A_SKILLS_DIR`). An aggregated
-  `skills/manifest.json` (regen: `python -m loop.skills`) is the fast path for
-  list calls and is served by `GET /tools`; folders are the authoring source.
+- **Tool discovery** is registry-independent: the platform **catalog root**
+  (repo root — `skills/<id>/SKILL.md` + mirrored `mcp/<id>/schema.snapshot.json`,
+  see `docs/CATALOG.md`) is used first, so the loop works with no live MCP
+  registry; live MCP `list_tools()` is the fallback (`B2A_SKILLS_DIR` /
+  `AGENT_SKILLS_DIR` override the location). Plain skills dirs with an
+  aggregated `manifest.json` fast path (regen: `python -m loop.skills <dir>`)
+  are still accepted; the catalog root's aggregate is `catalog.lock.yaml`,
+  built by `tooling/lockbuild`.
 - Generator is **provider-agnostic** (`loop/llm.py`): a `Completer` seam
   (`prompt → text`) with `stub` (template, no key), `anthropic`, and
   `openai`-compatible (OpenAI / Ollama / vLLM / local via base URL) backends,

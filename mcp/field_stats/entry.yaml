@@ -1,0 +1,13 @@
+id: field_stats
+kind: mcp-tool
+version: 1.0.0
+registry_url: http://localhost:8000/mcp
+routing_summary_provenance: regenerated
+capability_tags:
+  - log-analysis
+  - read-only
+detail: >-
+  Numeric fields (duration_ms, status_code) return {"field", "min", "max",
+  "avg", "count"}. Categorical fields (level, service, message) return
+  {"field", "cardinality", "top_values"} where top_values is the ten most
+  common values with their counts.
