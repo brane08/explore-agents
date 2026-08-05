@@ -1,0 +1,4 @@
+<div class="event {{ 'warn' if e.event_type == 'warn' else '' }}" data-seq="{{ e.seq }}" data-type="{{ e.event_type }}">
+  <strong>{{ e.event_type }}</strong>
+  {% for k, v in e.data.items() %}<span> {{ k }}={{ v }}</span>{% endfor %}
+</div>

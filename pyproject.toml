@@ -1,2 +1,2 @@
 [tool.uv.workspace]
-members = ["tooling/lockbuild"]
+members = ["tooling/lockbuild", "tooling/orchestrator", "tooling/certify"]

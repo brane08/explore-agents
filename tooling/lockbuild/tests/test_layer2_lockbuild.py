@@ -124,6 +124,22 @@ def test_composite_tier_is_min_of_members(catalog):
     assert entry(lock, "pair")["trust_tier"] == "untrusted"
 
 
+def test_b1_registration_tier_derived_from_bindings(catalog):
+    """CHECKLISTS layer 4: a config-only B1 registration (`assembly: b1`)
+    inherits min(binding tiers) instead of joining trust.yaml."""
+    edit_entry(catalog, "agents/composed", assembly="b1")
+    wyaml(catalog / "trust.yaml", {"records": [
+        {"id": "greet", "version": "1.0.0", "model_profile": "opus-class-ref",
+         "tier": "validated", "granted_by": "t", "evidence": "e"},
+        {"id": "echo-tool", "version": "1.0.0", "model_profile": "opus-class-ref",
+         "tier": "quarantined", "granted_by": "t", "evidence": "e"},
+    ]})
+    lock = build_lock(catalog, built_from=BUILT_FROM, built_at=BUILT_AT)
+    assert entry(lock, "composed")["trust_tier"] == "quarantined"  # min of parts
+    # a non-assembly agent with the same bindings stays untrusted
+    assert entry(lock, "report-instance")["trust_tier"] == "untrusted"
+
+
 def test_composite_cycle_detected(catalog):
     from conftest import composite
     composite(catalog, "loop-a", members=[{"id": "loop-b", "version": "1.0.0"}])

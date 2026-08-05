@@ -1,0 +1,20 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Task console</h1>
+<div class="banner">
+  session <code>{{ session.session_id[:8] }}</code> ·
+  catalog pinned at <code>{{ session.catalog_ref[:12] }}</code>
+  {% if session.catalog_ref != current %}
+    <span class="lag">(catalog has moved to <code>{{ current[:12] }}</code>)</span>
+    <form method="post" action="/session/new" style="display:inline">
+      <button type="submit">start new session on current catalog</button>
+    </form>
+  {% endif %}
+  {% if operator %} · <a href="/agents">catalog browser</a>{% endif %}
+</div>
+<form class="task" hx-post="/tasks" hx-target="#result" hx-swap="innerHTML" method="post" action="/tasks">
+  <p><textarea name="task" placeholder="Describe the task…"></textarea></p>
+  <button type="submit">Submit</button>
+</form>
+<div id="result"></div>
+{% endblock %}

@@ -1,0 +1,15 @@
+# Non-secret orchestrator settings. Secrets (ORCH_SECRET_KEY, OPENAI_API_KEY,
+# ANTHROPIC_API_KEY) live in secret.yaml.example — never committed with real
+# values (see .env.example / repo CLAUDE.md hard rules).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+data:
+  ORCH_AUTH_MODE: "bff"
+  ORCH_MATCH_THRESHOLD: "0.35"
+  ORCH_CONFIRM_THRESHOLD: "0.5"
+  ORCH_COVERAGE_THRESHOLD: "0.15"
+  ORCH_MODEL_PROFILE: "stub-class-ref"
+  ORCH_SCORER: "stub"
+  ORCH_HARNESS: "stub"

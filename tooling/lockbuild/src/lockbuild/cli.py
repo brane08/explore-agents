@@ -6,11 +6,15 @@ from pathlib import Path
 
 from lockbuild.build import LOCK_FILENAME, build_lock, render_lock, verify_lock
 from lockbuild.errors import LockbuildError
+from lockbuild.init import bootstrap
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lockbuild")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="scaffold an empty catalog root (dirs + tags.yaml + trust.yaml)")
+    p_init.add_argument("--root", type=Path, default=Path("."))
 
     p_build = sub.add_parser("build", help="rebuild catalog.lock.yaml from the tree")
     p_build.add_argument("--root", type=Path, default=Path("."))
@@ -22,6 +26,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        if args.command == "init":
+            created = bootstrap(args.root)
+            if created:
+                for p in created:
+                    print(f"created {p}")
+            else:
+                print(f"{args.root} already scaffolded")
+            return 0
         if args.command == "build":
             out = args.out or args.root / LOCK_FILENAME
             out.write_text(render_lock(build_lock(args.root)), encoding="utf-8")

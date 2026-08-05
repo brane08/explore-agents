@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.git/
+.idea/
+.DS_Store
+docs/
+explore-agents/
+log-agent-lab/

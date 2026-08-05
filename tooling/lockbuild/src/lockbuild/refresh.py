@@ -66,8 +66,11 @@ def refresh(
 ) -> list[str]:
     """Refresh every external entry; returns the ids whose snapshot changed."""
     root = Path(root)
-    if _current_branch(root) == "main":
-        raise RefreshOnMainError("refresh outputs must land on a PR branch, never main")
+    branch = _current_branch(root)
+    if branch in {"main", ""}:  # "" = detached HEAD (CI checkout default)
+        raise RefreshOnMainError(
+            "refresh outputs must land on a PR branch, never main or a detached HEAD"
+        )
 
     changed: list[str] = []
     for dirname, snapshot_name in SNAPSHOT_FILES.items():

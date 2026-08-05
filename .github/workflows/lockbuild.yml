@@ -15,6 +15,10 @@ jobs:
         run: uv sync --all-packages
       - name: Entry schema validation + checklist layers 1-2
         run: uv run pytest tooling/lockbuild/tests -q
+      - name: Orchestrator — checklist layers 3, 4, 10, 11
+        run: uv run pytest tooling/orchestrator/tests -q
+      - name: Certify — checklist layers 6, 12 (harness conformance)
+        run: uv run pytest tooling/certify/tests -q
       - name: Determinism gate — build twice, diff
         run: |
           uv run lockbuild build --root . --out lock-a.yaml

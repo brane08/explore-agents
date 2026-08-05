@@ -1,3 +1,21 @@
 # Orchestrator-owned trust ledger. Written ONLY by tooling/certify or recorded human
 # override. Append-only. Key: (id, version, model_profile). See docs/CATALOG.md §7.
-records: []
+records:
+  - id: es_search
+    version: 1.0.0
+    model_profile: stub-class-ref
+    tier: validated
+    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+    evidence: recorded-human-override (Phase 1 seed; session-authorized)
+  - id: es_aggregate
+    version: 1.0.0
+    model_profile: stub-class-ref
+    tier: validated
+    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+    evidence: recorded-human-override (Phase 1 seed; session-authorized)
+  - id: field_stats
+    version: 1.0.0
+    model_profile: stub-class-ref
+    tier: validated
+    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+    evidence: recorded-human-override (Phase 1 seed; session-authorized)

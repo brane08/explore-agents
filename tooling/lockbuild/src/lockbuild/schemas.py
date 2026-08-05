@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
 
-TIER_ORDER = {"untrusted": 0, "quarantined": 1, "validated": 2}
 BINDABLE_KINDS = {"skill", "mcp-tool"}
 
 # catalog dir → kinds allowed inside it
@@ -135,6 +134,10 @@ class AgentEntry(BaseEntry):
     model_requirements: dict = Field(default_factory=dict)
     delegation_requirements: list[str] = Field(default_factory=list)
     instantiated_from: InstantiatedFrom | None = None
+    # B1 registrations are config-only (CATALOG §5): zero novel code, so their
+    # tier is derived — min(binding tiers) at the assembly's model_profile —
+    # instead of joined from trust.yaml.
+    assembly: Literal["b1"] | None = None
 
 
 class ComponentEntry(BaseEntry):
@@ -173,7 +176,7 @@ class ManifestBinding(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
     version: str
-    hash: str
+    schema_hash: str  # CATALOG stage 4: manifest (id, version, schema_hash)
 
 
 class AgentManifest(BaseModel):

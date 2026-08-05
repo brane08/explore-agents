@@ -1,0 +1,21 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Certify queue</h1>
+<p class="banner">human-promotion surface (CATALOG §8 honesty clause) — certify proposes, a human promotes</p>
+{% if candidates %}
+<table>
+  <tr><th>candidate</th><th>agent_id</th><th>status</th><th>frozen inputs</th></tr>
+  {% for c in candidates %}
+  <tr>
+    <td><a href="/certify/{{ c.cid }}">{{ c.cid }}</a></td>
+    <td>{{ c.agent_id }}</td>
+    <td>{{ c.status }}</td>
+    <td>{{ "present" if c.has_inputs else "MISSING — refs not re-verifiable" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>No candidates in <code>_proposed/</code>.</p>
+{% endif %}
+<p><a href="/">back to console</a></p>
+{% endblock %}

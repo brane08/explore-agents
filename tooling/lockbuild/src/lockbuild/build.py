@@ -21,10 +21,10 @@ from lockbuild.schemas import (
     EXTERNAL_KINDS,
     KIND_MODELS,
     REQUIRED_FILES,
-    TIER_ORDER,
     AgentManifest,
     BaseEntry,
 )
+from lockbuild.trust import TIER_ORDER, effective_tier, has_record
 
 LOCK_VERSION = 3
 LOCK_FILENAME = "catalog.lock.yaml"
@@ -145,15 +145,7 @@ def _load_trust(root: Path) -> list[dict]:
 
 def _tier_for(se: ScannedEntry, records: list[dict]) -> str:
     profile = se.manifest.model_profile if se.manifest else None
-    matches = [
-        r for r in records
-        if r.get("id") == se.entry.id and r.get("version") == se.entry.version
-        and (profile is None or r.get("model_profile") == profile)
-    ]
-    if not matches:
-        return "untrusted"
-    # conservative: multiple applicable records collapse to the lowest tier
-    return min((r.get("tier", "untrusted") for r in matches), key=TIER_ORDER.__getitem__)
+    return effective_tier(records, se.entry.id, se.entry.version, profile)
 
 
 def _join(index: dict[str, ScannedEntry], root: Path, errors: list[str]) -> None:
@@ -164,6 +156,23 @@ def _join(index: dict[str, ScannedEntry], root: Path, errors: list[str]) -> None
 
     for se in index.values():
         se.tier = _tier_for(se, records)
+
+    # config-only B1 registrations (CATALOG §5): tier is derived from the
+    # parts — min(binding tiers) — since the assembly contains zero novel code.
+    # Any explicit trust record takes precedence, INCLUDING an untrusted one:
+    # a recorded recall must never be re-derived back up.
+    for se in index.values():
+        if (getattr(se.entry, "assembly", None) == "b1"
+                and not has_record(records, se.entry.id, se.entry.version)):
+            binding_tiers = [
+                index[ref.id].tier
+                for ref in se.entry.bindings
+                if ref.id in index
+            ]
+            if binding_tiers and len(binding_tiers) == len(se.entry.bindings):
+                se.tier = min(binding_tiers, key=TIER_ORDER.__getitem__)
+
+    for se in index.values():
         stale: list[str] = []
 
         if se.manifest:
@@ -173,7 +182,7 @@ def _join(index: dict[str, ScannedEntry], root: Path, errors: list[str]) -> None
                     errors.append(
                         f"{se.entry.id}: manifest references missing entry '{mb.id}' {mb.version}"
                     )
-                elif target.hash != mb.hash:
+                elif target.hash != mb.schema_hash:
                     stale.append("binding-drift")
             profile = se.manifest.model_profile
             if profile is not None:
@@ -263,7 +272,7 @@ def _lock_entry(se: ScannedEntry) -> dict:
         out["stale"] = True
         out["stale_reason"] = se.stale_reason
     for opt in ("bindings", "slots", "instantiated_from",
-                "model_requirements", "delegation_requirements"):
+                "model_requirements", "delegation_requirements", "assembly"):
         if se.raw.get(opt):
             out[opt] = se.raw[opt]
     return out

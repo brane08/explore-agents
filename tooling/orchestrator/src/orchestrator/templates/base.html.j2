@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>agent-platform</title>
+  <script src="/static/app.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+    .banner { background: #f0f4ff; padding: .5rem 1rem; border-radius: 6px; font-size: .85rem; }
+    .banner .lag { color: #a15c00; }
+    .error { background: #fff0f0; border-left: 4px solid #c00; padding: .5rem 1rem; }
+    .warn  { background: #fffbe6; border-left: 4px solid #c90; padding: .5rem 1rem; }
+    .event { font-size: .85rem; padding: .15rem 0; border-bottom: 1px dotted #ddd; }
+    table { border-collapse: collapse; } td, th { padding: .3rem .6rem; border: 1px solid #ccc; }
+    form.task textarea { width: 100%; height: 4rem; }
+  </style>
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>

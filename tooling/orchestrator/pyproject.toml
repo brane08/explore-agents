@@ -1,0 +1,37 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Meta-agent orchestrator: routing cascade, B1 assembly/registration, task console + SSE (docs/CATALOG.md §1/§5, docs/UI-PLANE.md)."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "jinja2>=3.1",
+    "sse-starlette>=2.1",
+    "itsdangerous>=2.2",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
+    "lockbuild",
+    "certify",
+]
+
+[project.optional-dependencies]
+mcp = ["fastmcp>=2.9"]
+
+[tool.uv.sources]
+lockbuild = { workspace = true }
+certify = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchestrator"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

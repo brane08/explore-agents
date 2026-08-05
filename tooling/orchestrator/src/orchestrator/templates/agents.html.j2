@@ -1,0 +1,18 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Catalog browser</h1>
+<p class="banner">lock pinned at <code>{{ session.catalog_ref[:12] }}</code> · read-only — catalog changes go through git</p>
+<table>
+  <tr><th>id</th><th>kind</th><th>version</th><th>tier</th><th>stale</th><th>tags</th><th>summary</th></tr>
+  {% for e in entries %}
+  <tr>
+    <td><a href="/agents/{{ e.id }}">{{ e.id }}</a></td>
+    <td>{{ e.kind }}</td><td>{{ e.version }}</td><td>{{ e.trust_tier }}</td>
+    <td>{{ e.stale_reason if e.stale else "" }}</td>
+    <td>{{ e.capability_tags | join(", ") }}</td>
+    <td>{{ e.routing_summary }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p><a href="/">back to console</a></p>
+{% endblock %}

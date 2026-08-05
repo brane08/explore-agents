@@ -146,15 +146,15 @@ def catalog(tmp_path: Path) -> Path:
                   {"id": "echo-tool", "version": "1.0.0"}],
         model_profile="opus-class-ref",
         manifest_bindings=[
-            {"id": "greet", "version": "1.0.0", "hash": greet_h},
-            {"id": "echo-tool", "version": "1.0.0", "hash": echo_h},
+            {"id": "greet", "version": "1.0.0", "schema_hash": greet_h},
+            {"id": "echo-tool", "version": "1.0.0", "schema_hash": echo_h},
         ],
     )
     agent(
         root, "report-instance",
         bindings=[{"id": "greet", "version": "1.0.0"}],
         model_profile="opus-class-ref",
-        manifest_bindings=[{"id": "greet", "version": "1.0.0", "hash": greet_h}],
+        manifest_bindings=[{"id": "greet", "version": "1.0.0", "schema_hash": greet_h}],
         instantiated_from={"id": "report-template", "version": "1.0.0", "hash": tmpl_h},
     )
     composite(root, "pair", members=[

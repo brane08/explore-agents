@@ -1,0 +1,73 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Candidate {{ cid }}</h1>
+
+{% if not candidate.ok %}
+<p class="banner">unloadable: {{ candidate.load_errors | join("; ") }}</p>
+{% elif inputs is none %}
+<p class="banner">frozen §0 inputs missing — criteria refs cannot be re-verified; steps not run</p>
+{% else %}
+
+<h2>Manifest</h2>
+<table>
+  <tr><th>agent_id</th><td>{{ candidate.manifest.agent_id }}</td></tr>
+  <tr><th>kind / mode / scope</th>
+      <td>{{ candidate.manifest.kind }} / {{ candidate.manifest.mode }} / {{ candidate.manifest.scope }}</td></tr>
+  <tr><th>status</th><td>{{ candidate.manifest.status }}</td></tr>
+  <tr><th>harness</th><td>{{ candidate.manifest.harness }}</td></tr>
+  <tr><th>model_profile</th><td>{{ candidate.manifest.model_profile }}</td></tr>
+  <tr><th>catalog_ref</th><td><code>{{ candidate.manifest.catalog_ref[:12] }}</code></td></tr>
+</table>
+
+<h2>Certify steps (mechanical)</h2>
+<table>
+  <tr><th>step</th><th>result</th><th>detail</th></tr>
+  {% for s in steps %}
+  <tr>
+    <td><code>{{ s.step }}</code></td>
+    <td>{{ "pass" if s.passed else "FAIL" }}</td>
+    <td>{{ s.detail }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p>eval (§8.3) and the judge review (§8.6) are model-backed — pending; their absence
+here is evidence they have not run, not evidence they passed.</p>
+
+<h2>Binding audit</h2>
+<table>
+  <tr><th>entry</th><th>version</th><th>live tier</th></tr>
+  {% for b in audit %}
+  <tr><td>{{ b.id }}</td><td>{{ b.version }}</td><td>{{ b.tier }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Evalmatrix (nearest templates)</h2>
+{% if applicable or inapplicable %}
+<p>applicable rows: {{ applicable | map(attribute="id") | join(", ") or "none" }}</p>
+<ul>
+  {% for row in inapplicable %}
+  <li><code>{{ row.id }}</code> inapplicable — {{ row.failed_check }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>no nearest-template rows supplied.</p>
+{% endif %}
+
+<h2>Report</h2>
+<pre>{{ candidate.report }}</pre>
+
+<h2>Human findings</h2>
+<form method="post" action="/certify/{{ cid }}/reject">
+  <textarea name="reason" rows="3" cols="70"
+            placeholder="findings / rejection reason (diffed against judge findings when the judge runs)"></textarea>
+  <p>
+    <button type="submit">Reject</button>
+  </p>
+</form>
+<form method="post" action="/certify/{{ cid }}/promote">
+  <button type="submit">Promote (atomic commit, enters quarantined)</button>
+</form>
+{% endif %}
+
+<p><a href="/certify">back to queue</a></p>
+{% endblock %}

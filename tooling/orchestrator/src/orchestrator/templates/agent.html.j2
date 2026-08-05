@@ -1,0 +1,15 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1><code>{{ entry.id }}</code> <small>({{ entry.kind }} {{ entry.version }}, {{ entry.trust_tier }})</small></h1>
+<p>{{ entry.routing_summary }}</p>
+<p>{{ entry.detail }}</p>
+{% if entry.kind == "agent" %}
+<form class="task" hx-post="/agents/{{ entry.id }}/invoke" hx-target="#result" hx-swap="innerHTML"
+      method="post" action="/agents/{{ entry.id }}/invoke">
+  <p><textarea name="task" placeholder="Task for this agent…"></textarea></p>
+  <button type="submit">Invoke</button>
+</form>
+<div id="result"></div>
+{% endif %}
+<p><a href="/">back to console</a></p>
+{% endblock %}

@@ -28,10 +28,12 @@ def _scope_files(entry_dir: Path, kind: str) -> list[Path]:
 def entry_hash(entry_dir: Path, kind: str) -> str:
     h = hashlib.sha256()
     for p in _scope_files(entry_dir, kind):
-        rel = p.relative_to(entry_dir).as_posix()
+        rel = p.relative_to(entry_dir).as_posix().encode("utf-8")
         data = p.read_bytes().replace(b"\r\n", b"\n")
-        h.update(rel.encode("utf-8"))
-        h.update(b"\0")
+        # length-prefixed fields: content containing NUL/newlines can never
+        # forge a file boundary, so distinct trees cannot collide
+        h.update(f"{len(rel)}:".encode())
+        h.update(rel)
+        h.update(f"{len(data)}:".encode())
         h.update(data)
-        h.update(b"\0")
     return h.hexdigest()
