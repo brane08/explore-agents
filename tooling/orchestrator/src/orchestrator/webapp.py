@@ -39,6 +39,8 @@ from certify.steps import (
 
 from orchestrator import assembly as assembly_mod
 from orchestrator.config import Settings, settings_from_env
+from orchestrator.criteria import CriteriaError
+from orchestrator.dispatch import dispatch_b2b, select_harness
 from orchestrator.errors import CODES, StructuredError
 from orchestrator.executor import ToolInvoker, run_invocation
 from orchestrator.lockload import current_ref, entry_by_id, load_lock_at
@@ -285,7 +287,11 @@ def create_app(
                 "result_ref": f"{result.error.code} {result.error.context}".strip(),
             })
             store.set_invocation(invocation.invocation_id, status="error")
-            response = HTMLResponse(render_error(result.error))
+            response = HTMLResponse(
+                render_error(result.error)
+                + (_generate_form(task)
+                   if result.error.code == "PATTERN_UNRECOGNIZED"
+                   and is_operator(request) else ""))
         else:
             if result.outcome == "invoke-agent":
                 agent_entry = result.agent_entry
@@ -301,6 +307,73 @@ def create_app(
                 _execute, invocation.invocation_id, session, task,
                 agent_entry, tools, register_after)
             response = page("task_started.html.j2", invocation=invocation)
+        if created:
+            attach_cookie(response, session)
+        return response
+
+    # -- B2b generation (operator-triggered, ROADMAP §3) -------------------------
+
+    def _generate_form(task: str) -> str:
+        return jinja.get_template("generate_offer.html.j2").render(task=task)
+
+    def _impl_profile() -> dict | None:
+        """The resolved model profile as catalog data, for the independence check.
+
+        The lock carries routing fields only, so `provider` / `profile_class`
+        come from the profile entry itself. Missing profile ⇒ None: the check
+        then records "implementation family unknown" instead of asserting a
+        diversity it could not verify.
+        """
+        entry = (settings.catalog_root / "models" / settings.model_profile
+                 / "entry.yaml")
+        if not entry.is_file():
+            return None
+        return _yaml.safe_load(entry.read_text(encoding="utf-8")) or None
+
+    @app.post("/generate", response_class=HTMLResponse)
+    def request_generation(request: Request, task: str = Form(...)):
+        """Dispatch B2b for a task the cascade could not cover.
+
+        The cascade is re-run first and generation is refused unless it still
+        reports PATTERN_UNRECOGNIZED. Without that, a hand-posted form would be
+        a way around the one control that stops the catalog from growing a
+        second copy of a capability it already has — and the residual recorded
+        as B2 backlog would no longer match what was actually generated.
+        """
+        require_operator(request)
+        session, created = get_session(request)
+        lock = _pinned_lock(session)
+
+        result = route(task, lock, settings.catalog_root, session.user_sub,
+                       scorer, settings, store, operator=True)
+        if not (result.outcome == "error"
+                and result.error.code == "PATTERN_UNRECOGNIZED"):
+            raise HTTPException(
+                status_code=409,
+                detail="the cascade covers this task — generation is for "
+                       "PATTERN_UNRECOGNIZED residuals only",
+            )
+
+        try:
+            dispatched = dispatch_b2b(
+                task, settings.catalog_root, lock, settings,
+                settings.harness_id, select_harness(),
+                catalog_ref=session.catalog_ref,
+                impl_profile=_impl_profile(),
+            )
+        except CriteriaError as exc:
+            # Criteria that nobody authored produce evidence that means nothing;
+            # no candidate is better than an uncertifiable one.
+            raise HTTPException(status_code=409,
+                                detail=f"criteria could not be authored: {exc}")
+
+        if dispatched.outcome != "candidate":
+            raise HTTPException(status_code=409, detail=dispatched.refusal)
+
+        logger.info("b2b dispatched session_id=%s candidate=%s",
+                    session.session_id, dispatched.candidate_dir.name)
+        response = RedirectResponse(f"/certify/{dispatched.candidate_dir.name}",
+                                    status_code=303)
         if created:
             attach_cookie(response, session)
         return response

@@ -28,6 +28,7 @@ class Settings:
     max_agent_runtime_s: int = 600
     sse_timeout_s: int = 3600
     register_commit: bool = True              # commit B1 registrations (epoch-pinned routing needs a SHA)
+    harness_id: str = "stub-harness/0"        # conformance-list id dispatched for B2b (§10)
     operator_users: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -50,6 +51,7 @@ _ENV_FIELDS = {
     "ORCH_CONFIRM_THRESHOLD": ("confirm_threshold", float),
     "ORCH_COVERAGE_THRESHOLD": ("coverage_threshold", float),
     "ORCH_MODEL_PROFILE": ("model_profile", str),
+    "ORCH_HARNESS_ID": ("harness_id", str),
 }
 
 
