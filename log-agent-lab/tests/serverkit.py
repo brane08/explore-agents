@@ -15,6 +15,10 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).parents[1]  # log-agent-lab/
+# The tool plane lives outside the lab: it stands in for an external MCP
+# server the platform does not own (docs/CATALOG.md — `mcp-tool` is an
+# external kind, reached over registry_url, mirrored by snapshot).
+TOOL_PLANE = ROOT.parent / "reference-tools" / "src"
 
 
 def free_port() -> int:
@@ -64,13 +68,13 @@ def wait_mcp(base_url: str, proc: subprocess.Popen, timeout: float = 30.0) -> No
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"mcp_server exited early:\n{proc.communicate()[0]}")
+            raise RuntimeError(f"reference-tools MCP server exited early:\n{proc.communicate()[0]}")
         try:
             if anyio.run(_list) > 0:
                 return
         except Exception:
             time.sleep(0.5)
-    raise TimeoutError(f"mcp_server not serving tools within {timeout}s")
+    raise TimeoutError(f"reference-tools MCP server not serving tools within {timeout}s")
 
 
 def terminate(procs: list[subprocess.Popen]) -> None:
@@ -84,10 +88,10 @@ def terminate(procs: list[subprocess.Popen]) -> None:
 
 @contextlib.contextmanager
 def boot_mcp():
-    """Boot mcp_server on a free port; yield its base URL; tear down."""
+    """Boot the reference MCP server on a free port; yield its base URL; tear down."""
     port = free_port()
     url = f"http://127.0.0.1:{port}"
-    proc = spawn("server:app", ROOT / "mcp_server" / "src", port)
+    proc = spawn("server:app", TOOL_PLANE, port)
     try:
         wait_mcp(url, proc)
         yield url

@@ -19,6 +19,15 @@ jobs:
         run: uv run pytest tooling/orchestrator/tests -q
       - name: Certify — checklist layers 6, 12 (harness conformance)
         run: uv run pytest tooling/certify/tests -q
+      - name: Snapshot contract — mirrored schemas vs. the reference tool plane
+        # The step above skips this test when fastmcp is absent, which would
+        # report green while checking nothing. SNAPSHOT_CONTRACT_REQUIRED turns
+        # that skip into a failure, so the gate cannot silently stop running.
+        env:
+          SNAPSHOT_CONTRACT_REQUIRED: "1"
+        run: |
+          uv sync --all-packages --all-extras
+          uv run pytest tooling/lockbuild/tests/test_snapshot_contract.py -q -rs
       - name: Determinism gate — build twice, diff
         run: |
           uv run lockbuild build --root . --out lock-a.yaml

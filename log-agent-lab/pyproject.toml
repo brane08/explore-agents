@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["mcp_server", "agent_app", "b2a_app", "agentflow_ui", "skills_kit"]
+members = ["agent_app", "b2a_app", "agentflow_ui", "skills_kit"]
 
 
 [tool.uv]
@@ -13,5 +13,5 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 markers = [
     "integration: requires live MCP server subprocess (run with -m integration)",
-    "e2e: end-to-end test that boots mcp_server + agent_app + b2a_app as subprocesses (slow; opt-in via -m e2e)",
+    "e2e: end-to-end test that boots reference-tools + agent_app + b2a_app as subprocesses (slow; opt-in via -m e2e)",
 ]
