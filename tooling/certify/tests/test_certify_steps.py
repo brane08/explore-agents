@@ -15,7 +15,7 @@ from certify.conformance_list import record
 from certify.playbook import HarnessInputs, criteria_hash
 from certify.candidate import load_candidate
 from certify.evalrun import EVIDENCE_NAME, load_eval_evidence, persist_eval_evidence
-from certify.steps import step_eval, step_layout_manifest, step_rebase
+from certify.steps import step_eval, step_layout_manifest, step_rebase, step_status
 from certify_fixtures import LOCK, write_candidate
 
 
@@ -563,3 +563,42 @@ def test_trust_record_points_at_the_stored_eval_evidence(promo_root):
         (promo_root / "trust.yaml").read_text(encoding="utf-8"))["records"][0]
     digest = record["evidence"].split("eval=")[1].split()[0]
     assert (promo_root / "traces" / digest / EVIDENCE_NAME).is_file()
+
+
+# --- step 7 gate: reported status (playbook §7) -------------------------------
+
+def _set_status(cdir: Path, status: str) -> None:
+    import yaml as _yaml
+    manifest_file = cdir / "AGENT_MANIFEST.yaml"
+    data = _yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
+    data["status"] = status
+    manifest_file.write_text(_yaml.safe_dump(data, sort_keys=True), encoding="utf-8")
+
+
+def test_status_step_passes_a_complete_candidate(candidate_dir):
+    assert step_status(_load(candidate_dir, _inputs())).passed
+
+
+def test_status_step_refuses_an_honest_partial(candidate_dir):
+    write_candidate(candidate_dir, _inputs(), status="PARTIAL")
+    result = step_status(load_candidate(candidate_dir))
+    assert not result.passed
+    assert "PARTIAL" in result.detail
+
+
+def test_promotion_refuses_a_partial_candidate(promo_root):
+    """Honest PARTIAL is the behaviour §7 wants; certifying one would make the
+    honest answer and a false COMPLETE lead to the same place."""
+    _set_status(_candidate_dir(promo_root), "PARTIAL")
+    result, calls = _promote(promo_root)
+    assert not result.passed
+    assert "PARTIAL" in result.detail
+    assert not (promo_root / "agents" / "log-error-lister").exists()
+    assert calls["commits"] == []
+
+
+def test_promotion_refuses_an_error_candidate(promo_root):
+    _set_status(_candidate_dir(promo_root), "ERROR")
+    result, _ = _promote(promo_root)
+    assert not result.passed
+    assert "not COMPLETE" in result.detail

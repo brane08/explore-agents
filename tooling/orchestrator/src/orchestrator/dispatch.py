@@ -40,6 +40,7 @@ from certify.playbook import (
 )
 
 from orchestrator.config import Settings
+from orchestrator.criteria import CriteriaAuthor, author_criteria
 from orchestrator.errors import StructuredError
 from orchestrator.openai_compat import build_client
 
@@ -205,6 +206,50 @@ def dispatch(
                                 f"candidate {target.name} status {outcome.status}"))
     return DispatchResult("candidate", candidate_dir=target,
                           harness_outcome=outcome, events=events)
+
+
+def dispatch_b2b(
+    task_spec: str,
+    catalog_root: Path,
+    lock: dict,
+    settings: Settings,
+    harness_id: str,
+    harness: Harness,
+    *,
+    catalog_ref: str,
+    scope: str = "full-agent",
+    residual: str | None = None,
+    nearest_templates: list[dict] | None = None,
+    target_runtime: str = "langgraph-py311",
+    author: CriteriaAuthor | None = None,
+    impl_profile: dict | None = None,
+) -> DispatchResult:
+    """The B2b entry point: author the criteria, then dispatch against them.
+
+    `dispatch` takes BEHAVIORAL_CRITERIA as a frozen string, which is correct
+    for replay and for the conformance fixtures but leaves open the one thing
+    playbook §0 forbids — criteria that arrive from whoever asked for the
+    agent, or from the model that will build it. Routing goes through here, so
+    the criteria are authored by an independent model call at routing time and
+    the author's identity travels to the sidecar as provenance.
+
+    A `CriteriaError` propagates: dispatching Role A with unauthored criteria
+    would produce a candidate whose certification evidence means nothing, so
+    failing to author is failing to dispatch.
+    """
+    criteria, note = author_criteria(task_spec, residual=residual, author=author,
+                                     impl_profile=impl_profile)
+    inputs = build_inputs(
+        task_spec, criteria.text, catalog_ref, lock, settings, harness_id,
+        scope=scope, residual=residual, nearest_templates=nearest_templates,
+        target_runtime=target_runtime,
+    )
+    result = dispatch(inputs, catalog_root, harness,
+                      criteria_authored_by=criteria.authored_by)
+    # `delegation`, not a new event kind: the SSE vocabulary is fixed at
+    # delegation/warn (UI-PLANE §4), and authoring is part of the delegation.
+    result.events.insert(0, DispatchEvent("delegation", note))
+    return result
 
 
 # --- shared harness prompt + manifest hygiene --------------------------------

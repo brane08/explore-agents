@@ -33,6 +33,7 @@ from certify.steps import (
     step_layout_manifest,
     step_rebase,
     step_security_static,
+    step_status,
     step_structural,
 )
 
@@ -454,6 +455,7 @@ def create_app(
         security = step_security_static(candidate, inputs)
         return [
             step_layout_manifest(candidate, inputs, settings.catalog_root),
+            step_status(candidate),
             step_rebase(candidate, lock),
             step_structural(candidate, inputs),
             security,

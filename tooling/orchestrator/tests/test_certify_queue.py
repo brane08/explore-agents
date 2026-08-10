@@ -54,9 +54,17 @@ sys.exit(0)
 
 @pytest.fixture
 def certified_candidate(candidate: str, catalog_repo: Path) -> str:
+    """A candidate as a *conformant* harness would leave it.
+
+    The dispatch stub honestly reports PARTIAL with an empty slot surface and a
+    no-op eval runner, so its raw output is not promotable — see
+    `test_promote_refuses_a_candidate_that_fails_the_mechanical_steps`, which
+    pins that. This fixture supplies what a real completed run would have.
+    """
     cdir = catalog_repo / "agents" / "_proposed" / candidate
     manifest_file = cdir / "AGENT_MANIFEST.yaml"
     manifest = yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
+    manifest["status"] = "COMPLETE"
     manifest["slot_value_surface"] = [
         {"name": "level", "type": "value", "location": "config.level"}]
     manifest_file.write_text(yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8")

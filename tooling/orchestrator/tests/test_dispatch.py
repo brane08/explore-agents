@@ -23,6 +23,7 @@ from orchestrator.dispatch import (
     build_inputs,
     candidate_id,
     dispatch,
+    dispatch_b2b,
     select_harness,
     stub_harness,
 )
@@ -254,6 +255,60 @@ def test_criteria_provenance_is_not_shown_to_role_a(settings, catalog):
 
     dispatch(_inputs(settings), catalog, spy, criteria_authored_by="gpt-4o-mini")
     assert not hasattr(seen["inputs"], "criteria_authored_by")
+
+
+# --- B2b entry point (criteria authored, never supplied) --------------------
+
+def test_dispatch_b2b_authors_the_criteria_it_dispatches_against(settings, catalog):
+    from orchestrator.criteria import Criteria
+
+    authored = Criteria("BC-1: returns only ERROR records.\n"
+                        "BC-2: reports failure when the log source is unreachable.",
+                        "gpt-4o-mini")
+    result = dispatch_b2b(TASK, catalog, LOCK, settings, HARNESS, stub_harness,
+                          catalog_ref="a" * 40,
+                          author=lambda t, r=None: authored)
+    assert result.outcome == "candidate"
+    data = yaml.safe_load(
+        Path(result.candidate_dir).with_suffix(".inputs.yaml").read_text(encoding="utf-8"))
+    assert data["behavioral_criteria"] == authored.text
+    assert data["criteria_authored_by"] == "gpt-4o-mini"
+
+
+def test_dispatch_b2b_defaults_to_the_stub_author_without_credentials(
+        settings, catalog, monkeypatch):
+    monkeypatch.delenv("ORCH_CRITERIA", raising=False)
+    result = dispatch_b2b(TASK, catalog, LOCK, settings, HARNESS, stub_harness,
+                          catalog_ref="a" * 40)
+    data = yaml.safe_load(
+        Path(result.candidate_dir).with_suffix(".inputs.yaml").read_text(encoding="utf-8"))
+    assert data["criteria_authored_by"] == "stub"
+    assert data["behavioral_criteria"].startswith("BC-1: ")
+
+
+def test_dispatch_b2b_does_not_dispatch_when_criteria_cannot_be_authored(
+        settings, catalog):
+    from orchestrator.criteria import CriteriaError
+
+    def broken(task_spec, residual=None):
+        raise CriteriaError("model unreachable")
+
+    with pytest.raises(CriteriaError):
+        dispatch_b2b(TASK, catalog, LOCK, settings, HARNESS, stub_harness,
+                     catalog_ref="a" * 40, author=broken)
+    proposed = settings.catalog_root / PROPOSED_DIR
+    assert not proposed.exists() or not list(proposed.iterdir())
+
+
+def test_dispatch_b2b_refuses_a_same_family_author(settings, catalog):
+    from orchestrator.criteria import Criteria, CriteriaError
+
+    with pytest.raises(CriteriaError, match="not independent"):
+        dispatch_b2b(TASK, catalog, LOCK, settings, HARNESS, stub_harness,
+                     catalog_ref="a" * 40,
+                     author=lambda t, r=None: Criteria("BC-1: x", "claude-haiku-4-5"),
+                     impl_profile={"provider": "anthropic",
+                                   "profile_class": "claude-class"})
 
 
 def test_refused_dispatch_persists_no_inputs(settings, catalog):

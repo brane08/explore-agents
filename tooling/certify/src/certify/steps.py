@@ -104,6 +104,35 @@ def step_rebase(candidate: Candidate, current_lock: dict) -> StepResult:
     return StepResult(step, True)
 
 
+def step_status(candidate: Candidate) -> StepResult:
+    """Reported status — only `COMPLETE` is certifiable (playbook §7).
+
+    §7's contract checklist ends "Any `false` → status cannot be `COMPLETE`",
+    so a harness that reports `PARTIAL` is telling certify that at least one
+    criterion is unmet or one contract line is false. That is the *desired*
+    behaviour — "honest PARTIAL is acceptable; false COMPLETE is a
+    certification-integrity violation" — and the way to keep it desirable is
+    that an honest PARTIAL still does not promote. Certifying one would make
+    the honest answer and the false one lead to the same place, which is
+    exactly the pressure §7 exists to remove.
+    """
+    step = "status"
+    if not candidate.ok:
+        return StepResult(step, False,
+                          "; ".join(candidate.load_errors) or "unloadable candidate")
+    status = candidate.manifest.status
+    if status == "COMPLETE":
+        return StepResult(step, True)
+    if status == "PARTIAL":
+        return StepResult(step, False,
+                          "harness reported PARTIAL — an honest PARTIAL is a valid "
+                          "generation outcome but not a certifiable one (§7: any "
+                          "false checklist item ⇒ not COMPLETE); rebuild or reduce "
+                          "scope, do not certify around it")
+    return StepResult(step, False,
+                      f"status {status!r} is not COMPLETE — nothing to certify")
+
+
 def step_eval(
     candidate: Candidate,
     *,
@@ -400,6 +429,10 @@ def promote(
         return StepResult(step, False,
                           f"proposed capability_tags {proposed} are not in tags.yaml — "
                           "new tags require human approval before promotion")
+
+    status = step_status(candidate)
+    if not status.passed:
+        return StepResult(step, False, status.detail)
 
     # Layer 7 [M]: eval green on the manifest's profile, evidence captured.
     # Promotion is the last point where that can still be enforced — after it,
