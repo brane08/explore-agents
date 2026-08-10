@@ -49,6 +49,27 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+# playbook §5: exit 0 = all criteria pass, JSON per-criterion report. The
+# conformant double honours the whole contract; `eval_body` lets a test break
+# one clause of it at a time.
+EVAL_RUNNER = """\
+import json, os, sys
+
+criteria = [
+    {"id": "BC-1", "passed": True},
+    {"id": "BC-2", "passed": True},
+    {"id": "IC-1", "passed": True},
+]
+report = {"model_profile": os.environ.get("MODEL_PROFILE", ""), "criteria": criteria}
+path = os.environ.get("EVAL_REPORT")
+if path:
+    open(path, "w", encoding="utf-8").write(json.dumps(report))
+else:
+    sys.stdout.write(json.dumps(report))
+sys.exit(0 if all(c["passed"] for c in criteria) else 1)
+"""
+
+
 def _checklist_echo(values: dict[str, bool]) -> str:
     return "\n".join(f"- {item}: {str(values[item]).lower()}"
                      for item, _desc in CONTRACT_ITEMS)
@@ -67,6 +88,7 @@ def write_candidate(
     echo: dict[str, bool] | None = None,
     tests_body: str | None = None,
     src_body: str | None = None,
+    eval_body: str | None = None,
     extra_files: dict[str, str] | None = None,
     trace: bool = True,
     target_slot: dict | None = None,
@@ -121,7 +143,7 @@ def write_candidate(
            "def test_bc_1_only_error_records():\n    assert True\n\n\n"
            "def test_bc_2_tool_failure_degrades():\n    assert True\n\n\n"
            "def test_ic_1_returns_list():\n    assert True\n")
-    _write(out / "eval" / "run.py", "raise SystemExit(0)\n")
+    _write(out / "eval" / "run.py", EVAL_RUNNER if eval_body is None else eval_body)
     if trace:
         _write(out / "trace" / "turns.jsonl", '{"turn": 1, "action": "plan"}\n')
 

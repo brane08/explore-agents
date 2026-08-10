@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from certify.candidate import Candidate, load_candidate
+from certify.evalrun import (
+    EVIDENCE_NAME,
+    EvalRunner,
+    load_eval_evidence,
+    persist_eval_evidence,
+    subprocess_runner,
+)
 from certify.contract import (
     check_bindings,
     check_criteria_refs,
@@ -31,6 +38,7 @@ class StepResult:
     step: str
     passed: bool
     detail: str = ""
+    evidence: dict = field(default_factory=dict)
 
 
 def step_layout_manifest(candidate: Candidate, inputs: HarnessInputs,
@@ -94,6 +102,93 @@ def step_rebase(candidate: Candidate, current_lock: dict) -> StepResult:
                               f"catalog_ref ({b.version}/{b.schema_hash[:12]} vs "
                               f"{entry['version']}/{str(entry['hash'])[:12]})")
     return StepResult(step, True)
+
+
+def step_eval(
+    candidate: Candidate,
+    *,
+    runner: EvalRunner | None = None,
+    security: StepResult | None = None,
+    persist: bool = True,
+) -> StepResult:
+    """Step 3 — the candidate's own eval suite, on the manifest's profile.
+
+    Green *and* evidence: a run whose per-criterion results were not captured is
+    refused, because the value of `eval/` is that a profile migration reruns it
+    and compares against a recorded baseline (layer 8: class migration =
+    eval-rerun, never inherited evidence). The evidence is persisted into
+    `trace/`, which promotion moves to content-addressed storage.
+
+    Numbered 3, but it runs *last* among the mechanical steps: it executes
+    candidate-authored code, so `security` carries the static scan's result and
+    this refuses to run behind a failed one. The rule lives here rather than at
+    each call site — a caller that got the ordering wrong would execute code
+    certify had already flagged. See `evalrun` for the runner contract and for
+    what this is not (a sandbox).
+    """
+    step = "eval"
+    if security is not None and not security.passed:
+        return StepResult(step, False,
+                          "not run: the static security scan must pass first — "
+                          f"step 3 executes candidate code ({security.detail})")
+    if not candidate.ok:
+        return StepResult(step, False,
+                          "; ".join(candidate.load_errors) or "unloadable candidate")
+
+    profile = candidate.manifest.model_profile
+    if not profile:
+        return StepResult(step, False,
+                          "manifest declares no model_profile — eval evidence is "
+                          "only valid for the profile it ran on")
+
+    outcome = (runner or subprocess_runner)(candidate.path, profile)
+    criteria = list((outcome.report or {}).get("criteria") or [])
+    evidence = {
+        "runner": "eval/run.py",
+        "model_profile": profile,
+        "exit_code": outcome.exit_code,
+        "criteria": criteria,
+        "passed": False,
+        "detail": "",
+    }
+
+    def done(passed: bool, detail: str = "") -> StepResult:
+        evidence["passed"] = passed
+        evidence["detail"] = detail
+        if persist:
+            persist_eval_evidence(candidate.path, evidence)
+        return StepResult(step, passed, detail, evidence)
+
+    if outcome.exit_code is None:
+        return done(False, outcome.detail or "the eval runner produced no exit code")
+    if outcome.report is None:
+        return done(False,
+                    f"exited {outcome.exit_code} with no per-criterion report "
+                    f"(playbook §5: JSON report via ${{EVAL_REPORT}} or stdout)"
+                    + (f"; stderr: {outcome.detail}" if outcome.detail else ""))
+    if not criteria:
+        return done(False, "the eval report lists no criteria — no evidence to "
+                           "rerun against after a profile migration")
+
+    reported_profile = outcome.report.get("model_profile")
+    if reported_profile and reported_profile != profile:
+        return done(False,
+                    f"eval ran on profile {reported_profile!r} but the manifest "
+                    f"declares {profile!r} — evidence is not transferable")
+
+    failed = [str(c.get("id")) for c in criteria if not c.get("passed")]
+    if failed and outcome.exit_code == 0:
+        return done(False,
+                    f"runner reported exit 0 while its own report fails {failed} "
+                    "— the exit code is a claim, the report is the evidence")
+    if failed:
+        return done(False, f"failing criteria: {failed}")
+    if outcome.exit_code != 0:
+        return done(False,
+                    f"runner exited {outcome.exit_code} with every criterion "
+                    "reported green"
+                    + (f"; stderr: {outcome.detail}" if outcome.detail else ""))
+    return done(True)
 
 
 def select_evalmatrix_rows(
@@ -306,6 +401,27 @@ def promote(
                           f"proposed capability_tags {proposed} are not in tags.yaml — "
                           "new tags require human approval before promotion")
 
+    # Layer 7 [M]: eval green on the manifest's profile, evidence captured.
+    # Promotion is the last point where that can still be enforced — after it,
+    # the candidate is a catalog entry and the question is closed.
+    evidence = load_eval_evidence(candidate_dir)
+    if evidence is None:
+        return StepResult(step, False,
+                          "no eval evidence in trace/ — step 3 has not run; a "
+                          "candidate whose own eval suite was never executed is "
+                          "not certifiable")
+    if not evidence.get("passed"):
+        return StepResult(step, False,
+                          f"eval evidence is red: {evidence.get('detail') or 'failed'}")
+    if evidence.get("model_profile") != m.model_profile:
+        return StepResult(step, False,
+                          f"eval evidence is for profile "
+                          f"{evidence.get('model_profile')!r}, manifest declares "
+                          f"{m.model_profile!r} — evidence is not inherited across "
+                          "profiles (layer 8)")
+    eval_digest = hashlib.sha256(
+        (candidate_dir / "trace" / EVIDENCE_NAME).read_bytes()).hexdigest()
+
     dest = catalog_root / "agents" / m.agent_id
     if dest.exists():
         return StepResult(step, False, f"agents/{m.agent_id}/ already exists")
@@ -364,8 +480,13 @@ def promote(
             "model_profile": m.model_profile,
             "tier": "quarantined",
             "granted_by": run_id,
+            # The eval digest is the traces/<sha256>/ directory the evidence
+            # was just stored under, so the record points at the artifact
+            # rather than asserting the gate passed.
             "evidence": f"certify steps green; harness={m.harness}; "
-                        f"catalog_ref={m.catalog_ref}",
+                        f"catalog_ref={m.catalog_ref}; "
+                        f"eval={eval_digest} "
+                        f"({len(evidence.get('criteria', []))} criteria)",
         })
         trust_file.write_text(yaml.safe_dump(trust, sort_keys=True), encoding="utf-8")
 

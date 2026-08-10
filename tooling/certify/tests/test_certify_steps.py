@@ -14,7 +14,8 @@ import pytest
 from certify.conformance_list import record
 from certify.playbook import HarnessInputs, criteria_hash
 from certify.candidate import load_candidate
-from certify.steps import step_layout_manifest, step_rebase
+from certify.evalrun import EVIDENCE_NAME, load_eval_evidence, persist_eval_evidence
+from certify.steps import step_eval, step_layout_manifest, step_rebase
 from certify_fixtures import LOCK, write_candidate
 
 
@@ -376,7 +377,11 @@ def promo_root(tmp_path: Path) -> Path:
         {"tags": ["log-source", "log-analysis"]}), encoding="utf-8")
     (root / "trust.yaml").write_text(_yaml.safe_dump(
         {"records": []}), encoding="utf-8")
-    write_candidate(root / "agents" / "_proposed" / "log-error-lister", _inputs())
+    cdir = root / "agents" / "_proposed" / "log-error-lister"
+    write_candidate(cdir, _inputs())
+    # Promotion is downstream of certification: step 3 has run and left its
+    # evidence, exactly as it would before an operator sees the promote button.
+    assert step_eval(load_candidate(cdir)).passed
     return root
 
 
@@ -510,3 +515,51 @@ def test_promotion_failure_leaves_no_half_state(promo_root):
     records = _yaml.safe_load((promo_root / "trust.yaml").read_text(encoding="utf-8"))["records"]
     assert records == []
     assert calls["commits"] == []
+
+
+# --- step 7 gate: eval evidence (layer 7 [M]) ---------------------------------
+
+def _candidate_dir(root: Path) -> Path:
+    return root / "agents" / "_proposed" / "log-error-lister"
+
+
+def test_promotion_refuses_a_candidate_whose_eval_never_ran(promo_root):
+    (_candidate_dir(promo_root) / "trace" / EVIDENCE_NAME).unlink()
+    result, calls = _promote(promo_root)
+    assert not result.passed
+    assert "step 3 has not run" in result.detail
+    assert not (promo_root / "agents" / "log-error-lister").exists()
+    assert calls["commits"] == []
+
+
+def test_promotion_refuses_red_eval_evidence(promo_root):
+    cdir = _candidate_dir(promo_root)
+    evidence = load_eval_evidence(cdir)
+    evidence.update(passed=False, detail="failing criteria: ['BC-2']")
+    persist_eval_evidence(cdir, evidence)
+    result, _ = _promote(promo_root)
+    assert not result.passed
+    assert "BC-2" in result.detail
+
+
+def test_promotion_refuses_evidence_from_another_profile(promo_root):
+    """Layer 8: a class migration reruns eval; it never inherits the evidence."""
+    cdir = _candidate_dir(promo_root)
+    evidence = load_eval_evidence(cdir)
+    evidence["model_profile"] = "some-other-profile"
+    persist_eval_evidence(cdir, evidence)
+    result, _ = _promote(promo_root)
+    assert not result.passed
+    assert "some-other-profile" in result.detail
+
+
+def test_trust_record_points_at_the_stored_eval_evidence(promo_root):
+    """The record cites the artifact rather than asserting the gate passed: the
+    digest is the traces/ directory the evidence was filed under."""
+    import yaml as _yaml
+    result, _ = _promote(promo_root)
+    assert result.passed, result.detail
+    record = _yaml.safe_load(
+        (promo_root / "trust.yaml").read_text(encoding="utf-8"))["records"][0]
+    digest = record["evidence"].split("eval=")[1].split()[0]
+    assert (promo_root / "traces" / digest / EVIDENCE_NAME).is_file()

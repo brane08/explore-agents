@@ -29,6 +29,7 @@ from certify.playbook import HarnessInputs
 from certify.steps import (
     promote as certify_promote,
     select_evalmatrix_rows,
+    step_eval,
     step_layout_manifest,
     step_rebase,
     step_security_static,
@@ -442,6 +443,23 @@ def create_app(
     def _current_lock() -> dict:
         return load_lock_at(settings.catalog_root, current_ref(settings.catalog_root))
 
+    def _mechanical_steps(candidate, inputs: HarnessInputs, lock: dict):
+        """Steps 1-3, 5, 6 — the model-independent half of certify.
+
+        The queue screen and the promote action run this one function, so what
+        an operator approves is what was actually checked. Step 3 goes last and
+        is handed the security result: it executes candidate code, and its own
+        guard refuses to run behind a failed scan.
+        """
+        security = step_security_static(candidate, inputs)
+        return [
+            step_layout_manifest(candidate, inputs, settings.catalog_root),
+            step_rebase(candidate, lock),
+            step_structural(candidate, inputs),
+            security,
+            step_eval(candidate, security=security),
+        ]
+
     def _stub_summary_writer(spec_text: str, manifest) -> str:
         # Deterministic regeneration from SPEC (draft is advisory, never copied).
         # The certify-model writer rides this seam when creds exist.
@@ -487,12 +505,7 @@ def create_app(
         steps, audit, matrix = [], [], ([], [])
         if candidate.ok and inputs is not None:
             lock = _current_lock()
-            steps = [
-                step_layout_manifest(candidate, inputs, settings.catalog_root),
-                step_rebase(candidate, lock),
-                step_structural(candidate, inputs),
-                step_security_static(candidate, inputs),
-            ]
+            steps = _mechanical_steps(candidate, inputs, lock)
             matrix = select_evalmatrix_rows(candidate, inputs.nearest_templates, lock)
             by_id = {e["id"]: e for e in lock.get("entries", [])}
             audit = [{"id": b.id, "version": b.version,
@@ -511,6 +524,23 @@ def create_app(
                                _=Depends(require_operator)):
         cdir = _candidate_or_404(cid)
         sidecar = _proposed_root / f"{cid}.inputs.yaml"
+
+        # Re-run the mechanical steps against the tree as it is now, not as the
+        # detail screen found it: an operator's approval may be minutes old and
+        # the lock may have moved under it. This also produces the eval evidence
+        # promote() then verifies independently.
+        candidate = load_candidate(cdir)
+        inputs = _load_frozen_inputs(cid)
+        if not candidate.ok or inputs is None:
+            raise HTTPException(status_code=409,
+                                detail="; ".join(candidate.load_errors)
+                                or "frozen §0 inputs missing — cannot re-verify")
+        failed = [s for s in _mechanical_steps(candidate, inputs, _current_lock())
+                  if not s.passed]
+        if failed:
+            raise HTTPException(
+                status_code=409,
+                detail="; ".join(f"{s.step}: {s.detail}" for s in failed))
 
         def commit_promotion(paths, message: str) -> None:
             # the sidecar retires in the same atomic commit; only reached
