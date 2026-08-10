@@ -1,0 +1,12 @@
+# Controlled capability_tags vocabulary — lockbuild validates entries against this list.
+# Seed set; extend via PR (human-reviewed). Proposed tags from entry.draft.yaml require approval.
+tags:
+  - postgres
+  - sql
+  - read-only
+  - log-source
+  - log-analysis
+  - alert-sink
+  - report-sink
+  - http-fetch
+  - file-io

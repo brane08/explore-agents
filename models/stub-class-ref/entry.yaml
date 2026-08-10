@@ -1,0 +1,14 @@
+id: stub-class-ref
+kind: model
+version: 1.0.0
+routing_summary: Deterministic stub profile — reference profile for the stub class; used for dev and harness tests, no external provider.
+provider: local
+endpoint_class: local
+capabilities:
+  tool_use: true
+  structured_output: true
+  context_window: 128000
+  parallel_tools: false
+cost_class: free
+profile_class: stub-class
+status: active

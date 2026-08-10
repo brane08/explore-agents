@@ -1,0 +1,5 @@
+<div class="error" data-code="STALE_ENTRY">
+  <strong>STALE_ENTRY</strong> — The matched entry was refused (stale lock state or trust recall).
+  <p>It has been queued for rebase / eval-rerun.</p>
+  {% if error.context %}<p><code>{{ error.context }}</code></p>{% endif %}
+</div>

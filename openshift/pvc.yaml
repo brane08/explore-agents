@@ -1,0 +1,12 @@
+# sqlite state (sessions/events/promotion queue — orchestrator.sqlite3).
+# Single-writer: keep replicas at 1 as long as this backs the deployment.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

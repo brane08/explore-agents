@@ -1,0 +1,16 @@
+# ORCH_AUTH_MODE=bff means the orchestrator trusts an upstream identity
+# header — this Route alone does not authenticate anyone. Front it with
+# your gateway/oauth-proxy before exposing beyond a trusted network.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: orchestrator
+spec:
+  to:
+    kind: Service
+    name: orchestrator
+  port:
+    targetPort: 8010
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

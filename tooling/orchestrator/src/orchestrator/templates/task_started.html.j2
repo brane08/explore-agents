@@ -1,0 +1,8 @@
+<div class="invocation" id="inv-{{ invocation.invocation_id }}">
+  <p>Invocation <a href="/invocations/{{ invocation.invocation_id }}">
+    <code>{{ invocation.invocation_id[:8] }}</code></a></p>
+  <div hx-ext="sse" sse-connect="/invocations/{{ invocation.invocation_id }}/stream"
+       sse-swap="routing,invocation,node,tool_call,delegation,criteria,warn,terminal"
+       hx-swap="beforeend">
+  </div>
+</div>

@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 dist/
 .env
+generated/
+.pytest_cache/

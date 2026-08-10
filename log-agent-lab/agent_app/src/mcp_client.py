@@ -23,8 +23,8 @@ class MCPClient:
     async def call_tool(self, name: str, arguments: dict) -> dict:
         async with Client(self._mcp_url) as client:
             result = await client.call_tool(name, arguments)
-        # result is a list of content blocks; extract text
-        for block in result:
+        # result is a CallToolResult; content is the list of blocks
+        for block in result.content:
             if hasattr(block, "text"):
                 try:
                     return json.loads(block.text)

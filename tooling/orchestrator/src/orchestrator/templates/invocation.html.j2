@@ -1,0 +1,7 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Invocation <code>{{ invocation.invocation_id[:8] }}</code></h1>
+<p>agent: <code>{{ invocation.agent_id or "—" }}</code> · status: {{ invocation.status }}</p>
+{% for e in events %}{% include "event.html.j2" %}{% endfor %}
+<p><a href="/">back to console</a></p>
+{% endblock %}

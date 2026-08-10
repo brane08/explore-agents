@@ -57,6 +57,13 @@ def test_stub_generate_prints_json_results():
     assert "json.dumps(state" in source
 
 
+def test_stub_generate_nodes_are_resilient():
+    # a tool failure must be caught per-node, not crash the whole agent
+    _, source = stub_generate(_SPEC, feedback="")
+    assert "except Exception as exc:" in source
+    assert "'error'" in source
+
+
 def test_generate_candidate_writes_file(tmp_path):
     result = generate_candidate(_SPEC, iteration=0, generated_base_dir=tmp_path)
     assert isinstance(result, GenerationResult)

@@ -1,0 +1,13 @@
+id: es_search
+kind: skill
+version: 1.0.0
+routing_summary: Search mock log records, optionally filtered to a single log level; returns matching hits and a total count.
+capability_tags:
+  - log-source
+  - log-analysis
+  - read-only
+detail: >-
+  Searches the mock log corpus served by mcp_server. Returns {"hits": [...],
+  "total": N} where each hit carries level, service, message, timestamp,
+  duration_ms and status_code. query_level restricts to one level; size caps
+  the number of hits.

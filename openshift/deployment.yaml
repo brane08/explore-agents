@@ -1,0 +1,57 @@
+# Single replica: orchestrator.sqlite3 (PVC-backed) is single-writer.
+# No securityContext/runAsUser here — OpenShift's restricted SCC assigns an
+# arbitrary UID under gid 0 at admission; the image is already built for that
+# (see Dockerfile: /app/state is gid-0-writable, USER 1000:0 is a fallback
+# for non-OpenShift runtimes like plain Kubernetes or local `docker run`).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # avoid two pods writing the same PVC-backed sqlite file
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      containers:
+        - name: orchestrator
+          image: orchestrator:latest  # replace with the pushed image ref
+          ports:
+            - containerPort: 8010
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+            - secretRef:
+                name: orchestrator-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8010
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8010
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: orchestrator-state

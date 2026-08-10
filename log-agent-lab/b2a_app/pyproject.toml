@@ -11,7 +11,11 @@ dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
     "python-dotenv>=1.0",
+    "skills-kit",
 ]
+
+[tool.uv.sources]
+skills-kit = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
