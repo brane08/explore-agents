@@ -3,7 +3,7 @@ E2E fixtures — boot the three services as real subprocesses and drive them
 over HTTP. Nothing is imported in-process, so the `api` module-name collision
 between agent_app and b2a_app never arises.
 
-Boot order matters: mcp_server must be serving MCP before agent_app / b2a_app
+Boot order matters: the reference MCP server must be serving MCP before agent_app / b2a_app
 start, because b2a_app fetches the tool pool once in its lifespan.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/ — for serverkit
-from serverkit import ROOT, free_port, spawn, terminate, wait_http, wait_mcp
+from serverkit import ROOT, TOOL_PLANE, free_port, spawn, terminate, wait_http, wait_mcp
 
 
 @pytest.fixture(scope="session")
@@ -25,7 +25,7 @@ def services():
     mcp_url = f"http://127.0.0.1:{mcp_port}"
     procs: list[subprocess.Popen] = []
     try:
-        mcp = spawn("server:app", ROOT / "mcp_server" / "src", mcp_port)
+        mcp = spawn("server:app", TOOL_PLANE, mcp_port)
         procs.append(mcp)
         wait_mcp(mcp_url, mcp)
 

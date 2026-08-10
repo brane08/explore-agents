@@ -1,6 +1,7 @@
 [project]
-name = "mcp-server"
+name = "reference-tools"
 version = "0.1.0"
+description = "Reference MCP server standing in for an external tool plane; backs the seeded catalog entries."
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=3.4.2",
