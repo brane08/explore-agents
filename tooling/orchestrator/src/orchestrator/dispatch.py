@@ -117,11 +117,19 @@ def dispatch(
     inputs: HarnessInputs,
     catalog_root: Path,
     harness: Harness,
+    *,
+    criteria_authored_by: str = "",
 ) -> DispatchResult:
     """Invoke Role A for one candidate.
 
     Refusals happen *before* the harness runs: an unlisted harness or a missing
     §0 input is an invocation bug, not a generation attempt.
+
+    `criteria_authored_by` is provenance, not a §0 input: it names the model
+    that authored BEHAVIORAL_CRITERIA (`criteria.Criteria.authored_by`) and is
+    recorded in the sidecar so the independence claim can be audited after the
+    fact. It is deliberately kept out of `HarnessInputs` — Role A must not see
+    who wrote the criteria it is being graded against, and §0 is an exact list.
     """
     events: list[DispatchEvent] = []
     catalog_root = Path(catalog_root)
@@ -179,6 +187,7 @@ def dispatch(
     # layout is exact): certify re-verifies criteria refs against the exact
     # frozen text, never against the harness's echo of it.
     target.with_suffix(".inputs.yaml").write_text(yaml.safe_dump({
+        "criteria_authored_by": criteria_authored_by,
         "task_spec": inputs.task_spec,
         "behavioral_criteria": inputs.behavioral_criteria,
         "catalog_ref": inputs.catalog_ref,

@@ -236,6 +236,26 @@ def test_dispatch_persists_frozen_inputs_beside_candidate(settings, catalog):
     assert not (Path(result.candidate_dir) / "inputs.yaml").exists()
 
 
+def test_dispatch_records_who_authored_the_criteria(settings, catalog):
+    result = dispatch(_inputs(settings), catalog, stub_harness,
+                      criteria_authored_by="gpt-4o-mini")
+    data = yaml.safe_load(
+        Path(result.candidate_dir).with_suffix(".inputs.yaml").read_text(encoding="utf-8"))
+    assert data["criteria_authored_by"] == "gpt-4o-mini"
+
+
+def test_criteria_provenance_is_not_shown_to_role_a(settings, catalog):
+    """§0 is an exact list; the generator must not learn who grades it."""
+    seen: dict = {}
+
+    def spy(i, scratch):
+        seen["inputs"] = i
+        return stub_harness(i, scratch)
+
+    dispatch(_inputs(settings), catalog, spy, criteria_authored_by="gpt-4o-mini")
+    assert not hasattr(seen["inputs"], "criteria_authored_by")
+
+
 def test_refused_dispatch_persists_no_inputs(settings, catalog):
     result = dispatch(_inputs(settings, scope="delta"), catalog, stub_harness)
     assert result.outcome == "refused"

@@ -302,7 +302,7 @@ def step_security_static(candidate: Candidate, inputs: HarnessInputs) -> StepRes
     return StepResult(step, True)
 
 
-def _family(model_id: str) -> str:
+def model_family(model_id: str) -> str:
     """Leading token of the *model*, not the routing vendor.
 
     Gateway ids namespace by vendor (`anthropic/claude-3.5-sonnet`) and local
@@ -336,7 +336,7 @@ def step_model_diversity(*, judge_model: str, criteria_model: str,
               f"impl_profile={impl_profile.get('id', '')}\n")
     config_hash = hashlib.sha256(config.encode("utf-8")).hexdigest()[:16]
 
-    impl_family = _family(str(impl_profile.get("profile_class", "")))
+    impl_family = model_family(str(impl_profile.get("profile_class", "")))
     if impl_profile.get("provider") == "local" or impl_family in {"", "stub", "local"}:
         return StepResult(step, True,
                           f"impl family indeterminate ({impl_profile.get('provider')}/"
@@ -344,7 +344,7 @@ def step_model_diversity(*, judge_model: str, criteria_model: str,
                           f"comparable (feasibility clause); config_hash={config_hash}")
 
     for role, model in (("judge", judge_model), ("criteria-author", criteria_model)):
-        if _family(model) == impl_family:
+        if model_family(model) == impl_family:
             return StepResult(step, False,
                               f"{role} model {model!r} shares family {impl_family!r} "
                               "with the implementation profile — same-family "

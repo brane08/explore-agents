@@ -16,8 +16,8 @@ routing* (`router.route`: match_threshold, confirm_threshold, coverage_threshold
    "this capability does not cover the task" are different facts, and
    collapsing them silently sends reusable capability to B2b generation.
 
-The criteria-author prompt (ROADMAP Phase 1 pending design) rides the same
-seam when it lands — both are independent cheap model calls at routing time.
+The criteria author (`orchestrator.criteria`) is the other routing-time model
+call; both share the prompt hygiene in `orchestrator.prompting`.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from orchestrator.openai_compat import build_client, resolve_endpoint
+from orchestrator.prompting import MAX_FIELD_CHARS, fence  # noqa: F401 — re-export
 
 Scorer = Callable[[str, str], float]
 
@@ -73,24 +74,12 @@ _SYSTEM = (
 
 _USER = "<task>\n{task}\n</task>\n\n<capability>\n{cap}\n</capability>"
 
-# Catalog `detail` fields are unbounded; a single oversized entry would
-# otherwise blow the context (and the bill) of every route.
-MAX_FIELD_CHARS = 4000
 _DELIMS = ("<task>", "</task>", "<capability>", "</capability>")
 
 
-def _fence(text: str, limit: int = MAX_FIELD_CHARS) -> str:
-    """Neutralize the block delimiters and cap the length of one field."""
-    clean = text or ""
-    for delim in _DELIMS:
-        clean = clean.replace(delim, delim.replace("<", "‹"))
-    if len(clean) > limit:
-        clean = clean[:limit] + "\n…[truncated]"
-    return clean
-
-
 def _render(task_text: str, candidate_text: str) -> str:
-    return _USER.format(task=_fence(task_text), cap=_fence(candidate_text))
+    return _USER.format(task=fence(task_text, _DELIMS),
+                        cap=fence(candidate_text, _DELIMS))
 
 
 # A bare number, or the first number in a reply that ignored "only the number"
