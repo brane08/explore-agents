@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from conftest import git
+from orch_fixtures import git
 from orchestrator.dispatch import build_inputs, dispatch, stub_harness
 from orchestrator.lockload import current_ref, load_lock_at
 

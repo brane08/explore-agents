@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import yaml
 
-from conftest import TASK
+from orch_fixtures import TASK
 from lockbuild.build import build_lock
 from orchestrator.assembly import assembly_config, config_hash
 from test_layer3_routing import last_invocation, routing_steps

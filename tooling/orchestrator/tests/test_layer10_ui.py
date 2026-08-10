@@ -7,7 +7,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from conftest import TASK
+from orch_fixtures import TASK
 from orchestrator.errors import CODES, StructuredError
 from test_layer3_routing import last_invocation
 

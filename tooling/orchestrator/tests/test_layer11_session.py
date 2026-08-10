@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from itsdangerous import Signer
 
-from conftest import rebuild_and_commit
+from orch_fixtures import rebuild_and_commit
 from orchestrator.config import Settings
 from orchestrator.webapp import SESSION_COOKIE
 

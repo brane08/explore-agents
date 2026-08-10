@@ -17,7 +17,7 @@ from pathlib import Path
 from orchestrator.config import Settings
 from orchestrator.errors import StructuredError, normalize_residual
 from orchestrator.lockload import entries_by_kind
-from orchestrator.scoring import Scorer
+from orchestrator.scoring import Scorer, as_batch_scorer
 from orchestrator.store import Store
 from orchestrator.trustcheck import TIER_ORDER, load_records, transitive_tier
 
@@ -70,13 +70,18 @@ def route(
     events: list[RoutingEvent] = []
     records = load_records(catalog_root)
     user_tiers = allowed_tiers(user_sub, settings, operator)
+    # One route, one scorer cache: the entries scored in step 1 and step 3 are
+    # independent of each other, so they go out concurrently instead of one
+    # blocking round trip per catalog entry.
+    scorer = as_batch_scorer(scorer)
 
     # --- 1. existing agent match -------------------------------------------
     # candidates above threshold, best first; stale ones are refused + queued
     # individually so a stale best match never shadows a healthy second-best
+    agents = list(entries_by_kind(lock, "agent", "composite"))
     scored = sorted(
-        ((scorer(task_text, e.get("routing_summary", "")), e)
-         for e in entries_by_kind(lock, "agent", "composite")),
+        zip(scorer.batch(task_text, [e.get("routing_summary", "") for e in agents]),
+            agents),
         key=lambda t: (-t[0], t[1]["id"]),
     )
     for score, entry in scored:
@@ -111,13 +116,22 @@ def route(
 
     # --- 3. B1 tool coverage --------------------------------------------------
     tools = []
+    candidates: list[tuple[dict, str]] = []
     for entry in entries_by_kind(lock, "skill", "mcp-tool"):
-        text = " ".join([
+        if entry.get("stale"):
+            store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
+            events.append(RoutingEvent(
+                "b1-coverage", entry["id"],
+                note=f"STALE_ENTRY {entry['id']} {entry.get('stale_reason', '')}".strip(),
+            ))
+            continue
+        candidates.append((entry, " ".join([
             entry.get("routing_summary", ""),
             " ".join(entry.get("capability_tags", [])),
             entry.get("detail", ""),
-        ])
-        score = scorer(task_text, text)
+        ])))
+    scores = scorer.batch(task_text, [text for _, text in candidates])
+    for (entry, _), score in zip(candidates, scores):
         live = transitive_tier(records, entry, lock, settings.model_profile)
         if score >= settings.coverage_threshold and live == "validated":
             tools.append((score, entry))

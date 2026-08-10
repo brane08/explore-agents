@@ -19,7 +19,7 @@ from certify.conformance import (
     fixture_unsatisfiable,
     run_conformance,
 )
-from conftest import (
+from certify_fixtures import (
     agent_binder_harness,
     budget_burner_harness,
     conformant_harness,
@@ -129,7 +129,7 @@ def test_improvising_around_missing_input_is_caught(lock, tmp_path):
 
 def test_rebuilding_template_capability_is_caught(lock, tmp_path):
     """A delta that binds the template's own source instead of filling the gap."""
-    from conftest import write_candidate
+    from certify_fixtures import write_candidate
     from certify.conformance import HarnessOutcome
 
     def rebuilder(inputs, out):

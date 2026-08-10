@@ -209,10 +209,12 @@ def _join(index: dict[str, ScannedEntry], root: Path, errors: list[str]) -> None
                 se.stale_reason = reason
                 break
 
-    _resolve_composites(index, errors)
+    _resolve_composites(index, errors, records)
 
 
-def _resolve_composites(index: dict[str, ScannedEntry], errors: list[str]) -> None:
+def _resolve_composites(
+    index: dict[str, ScannedEntry], errors: list[str], records: list[dict]
+) -> None:
     resolving: set[str] = set()
     done: set[str] = set()
 
@@ -237,7 +239,12 @@ def _resolve_composites(index: dict[str, ScannedEntry], errors: list[str]) -> No
                 member_tiers.append("untrusted")
             else:
                 member_tiers.append(tier_of(ref.id, chain + (eid,)))
-        se.tier = min(member_tiers or ["untrusted"], key=TIER_ORDER.__getitem__)
+        derived = min(member_tiers or ["untrusted"], key=TIER_ORDER.__getitem__)
+        # Any explicit trust record takes precedence, INCLUDING an untrusted
+        # one: a recorded recall must never be re-derived back up (same
+        # invariant as the B1 assembly derivation above).
+        if not has_record(records, se.entry.id, se.entry.version):
+            se.tier = derived
         resolving.discard(eid)
         done.add(eid)
         return se.tier

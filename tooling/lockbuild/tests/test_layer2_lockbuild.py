@@ -6,7 +6,7 @@ import subprocess
 import pytest
 import yaml
 
-from conftest import edit_entry, w, wyaml
+from catalog_fixtures import edit_entry, w, wyaml
 from lockbuild.build import build_lock, render_lock, verify_lock
 from lockbuild.errors import LockbuildError
 from lockbuild.refresh import RefreshOnMainError, refresh
@@ -124,6 +124,23 @@ def test_composite_tier_is_min_of_members(catalog):
     assert entry(lock, "pair")["trust_tier"] == "untrusted"
 
 
+def test_composite_explicit_record_takes_precedence_over_derived_tier(catalog):
+    """An explicit trust record on a composite — INCLUDING a recall down to
+    untrusted — must never be re-derived back up from its members, same
+    invariant as B1 assembly derivation (CATALOG §7 recall semantics)."""
+    wyaml(catalog / "trust.yaml", {"records": [
+        {"id": "greet", "version": "1.0.0", "model_profile": "opus-class-ref",
+         "tier": "validated", "granted_by": "t", "evidence": "e"},
+        {"id": "farewell", "version": "1.0.0", "model_profile": "opus-class-ref",
+         "tier": "validated", "granted_by": "t", "evidence": "e"},
+        # members are both validated, but the composite itself was recalled
+        {"id": "pair", "version": "1.0.0", "model_profile": None,
+         "tier": "untrusted", "granted_by": "t", "evidence": "e"},
+    ]})
+    lock = build_lock(catalog, built_from=BUILT_FROM, built_at=BUILT_AT)
+    assert entry(lock, "pair")["trust_tier"] == "untrusted"
+
+
 def test_b1_registration_tier_derived_from_bindings(catalog):
     """CHECKLISTS layer 4: a config-only B1 registration (`assembly: b1`)
     inherits min(binding tiers) instead of joining trust.yaml."""
@@ -141,7 +158,7 @@ def test_b1_registration_tier_derived_from_bindings(catalog):
 
 
 def test_composite_cycle_detected(catalog):
-    from conftest import composite
+    from catalog_fixtures import composite
     composite(catalog, "loop-a", members=[{"id": "loop-b", "version": "1.0.0"}])
     composite(catalog, "loop-b", members=[{"id": "loop-a", "version": "1.0.0"}])
     with pytest.raises(LockbuildError, match="cycle"):

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import BUILT_AT, BUILT_FROM, edit_entry, w, wyaml
+from catalog_fixtures import BUILT_AT, BUILT_FROM, edit_entry, w, wyaml
 from lockbuild.build import build_lock
 from lockbuild.hashing import entry_hash
 from lockbuild.refresh import RefreshOnMainError, refresh

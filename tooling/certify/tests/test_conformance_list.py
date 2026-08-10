@@ -12,7 +12,7 @@ import yaml
 
 from certify.cli import main
 from certify.conformance_list import LIST_FILENAME, is_listed, load_listed, record
-from conftest import LOCK, conformant_harness, liar_harness
+from certify_fixtures import LOCK, conformant_harness, liar_harness
 
 
 def test_absent_list_lists_nobody(tmp_path: Path):
@@ -43,7 +43,7 @@ def _write_lock(root: Path) -> None:
 def test_cli_records_a_conformant_harness_and_exits_zero(tmp_path: Path):
     _write_lock(tmp_path)
     code = main(["conformance", "--root", str(tmp_path), "--harness", "good/1",
-                 "--backend", "conftest:conformant_harness", "--record"])
+                 "--backend", "certify_fixtures:conformant_harness", "--record"])
     assert code == 0
     assert is_listed(tmp_path, "good/1")
 
@@ -51,7 +51,7 @@ def test_cli_records_a_conformant_harness_and_exits_zero(tmp_path: Path):
 def test_cli_refuses_to_list_a_cheating_harness(tmp_path: Path):
     _write_lock(tmp_path)
     code = main(["conformance", "--root", str(tmp_path), "--harness", "liar/1",
-                 "--backend", "conftest:liar_harness", "--record"])
+                 "--backend", "certify_fixtures:liar_harness", "--record"])
     assert code == 1, "a cheating harness must fail the command"
     assert not is_listed(tmp_path, "liar/1")
 
@@ -59,5 +59,5 @@ def test_cli_refuses_to_list_a_cheating_harness(tmp_path: Path):
 def test_cli_without_record_writes_nothing(tmp_path: Path):
     _write_lock(tmp_path)
     main(["conformance", "--root", str(tmp_path), "--harness", "good/1",
-          "--backend", "conftest:conformant_harness"])
+          "--backend", "certify_fixtures:conformant_harness"])
     assert not (tmp_path / LIST_FILENAME).exists()

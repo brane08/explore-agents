@@ -281,6 +281,7 @@ def promote(
     behind `commit` (honesty clause).
     """
     import shutil
+    from datetime import datetime, timezone
 
     import yaml
 
@@ -355,25 +356,37 @@ def promote(
         (dest / "entry.yaml").write_text(
             yaml.safe_dump(entry, sort_keys=True), encoding="utf-8")
 
+        run_id = f"certify-run-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')}"
         trust = (yaml.safe_load(trust_before) or {}) if trust_before else {"records": []}
         trust.setdefault("records", []).append({
             "id": m.agent_id,
             "version": str(draft.get("version", "1.0.0")),
             "model_profile": m.model_profile,
             "tier": "quarantined",
-            "granted_by": "tooling/certify:promotion",
+            "granted_by": run_id,
             "evidence": f"certify steps green; harness={m.harness}; "
                         f"catalog_ref={m.catalog_ref}",
         })
         trust_file.write_text(yaml.safe_dump(trust, sort_keys=True), encoding="utf-8")
 
         run_lockbuild(catalog_root)
-
-        shutil.rmtree(candidate_dir)
     except Exception as exc:
         rollback()
         return StepResult(step, False, f"promotion rolled back: {exc}")
 
+    # Promotion is durable at this point (dest + trust.yaml + lock all written
+    # and rebuilt) — the _proposed/ source is now disposable. Its removal is
+    # cleanup, not part of the atomic operation: rolling back a fully
+    # succeeded promotion because deleting the leftover source failed would
+    # destroy the source without leaving the promoted copy either, i.e. the
+    # exact half-state this step exists to prevent.
+    cleanup_note = ""
+    try:
+        shutil.rmtree(candidate_dir)
+    except Exception as exc:
+        cleanup_note = (f" (promotion succeeded; failed to remove leftover "
+                        f"_proposed/{candidate_dir.name}: {exc})")
+
     commit([dest, trust_file, lock_file, catalog_root / "traces"],
            f"certify: promote {m.agent_id} (quarantined)")
-    return StepResult(step, True, f"promoted to agents/{m.agent_id}")
+    return StepResult(step, True, f"promoted to agents/{m.agent_id}{cleanup_note}")

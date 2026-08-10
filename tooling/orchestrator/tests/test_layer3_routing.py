@@ -1,7 +1,9 @@
 """CHECKLISTS layer 3 [M] — routing over the pinned-epoch lock."""
 from __future__ import annotations
 
-from conftest import GIBBERISH, TASK, add_skill, demote_all, rebuild_and_commit
+from orch_fixtures import GIBBERISH, TASK, add_skill, demote_all, rebuild_and_commit
+from orchestrator.router import route
+from orchestrator.scoring import lexical_scorer
 
 
 def routing_steps(store, invocation_id):
@@ -21,7 +23,7 @@ def test_router_input_is_the_pinned_lock_only(client, store, catalog_repo):
     task = "translate this document text into pig latin"
     add_skill(catalog_repo, "pig-latin",
               "Translate document text into pig latin.")
-    from conftest import grant_validated
+    from orch_fixtures import grant_validated
     grant_validated(catalog_repo, "pig-latin")
     rebuild_and_commit(catalog_repo, "add pig-latin")
 
@@ -89,6 +91,30 @@ def test_recall_pierces_the_epoch_pin(client, store, catalog_repo, settings):
     assert any("tier:" in reason for _, reason in [(e, r2) for e, r2 in store.stale_queue()])
 
 
+def test_stale_tool_is_refused_from_b1_coverage(catalog_repo, settings, store):
+    """CHECKLISTS layer 3 [M] 'stale entries refused' is unqualified — it must
+    hold for B1 tool-coverage candidates (skills/mcp-tools), not just agent
+    matches. Build the lock normally, then hand-flag one covering tool stale
+    (as lockbuild would for a kind that carries manifest bindings) and confirm
+    the router excludes it rather than silently assembling it in."""
+    from lockbuild.build import build_lock
+
+    lock = build_lock(catalog_repo)
+    es_search = next(e for e in lock["entries"] if e["id"] == "es_search")
+    es_search["stale"] = True
+    es_search["stale_reason"] = "binding-drift"
+
+    result = route(TASK, lock, catalog_repo, "user@example.com",
+                    lexical_scorer, settings, store)
+
+    stale_notes = [e for e in result.events
+                   if e.cascade_step == "b1-coverage" and "STALE_ENTRY" in e.note]
+    assert stale_notes and stale_notes[0].entry_id == "es_search"
+    assert ("es_search", "binding-drift") in store.stale_queue()
+    if result.outcome == "assemble-b1":
+        assert all(t["id"] != "es_search" for t in result.tools)
+
+
 def test_operator_authorization_joins_tiers(client, store, catalog_repo, settings):
     client.get("/")
     client.post("/tasks", data={"task": TASK})          # registers b1 agent
@@ -122,3 +148,35 @@ def test_stale_lock_entry_is_refused_and_queued(client, store, catalog_repo):
     assert store.stale_queue()
     # cascade continued (hard refusal of the entry, not of the task)
     assert any(s["cascade_step"] in {"b1-coverage", "unrecognized"} for s in steps)
+
+
+def test_routing_scores_the_catalog_in_parallel_not_one_entry_at_a_time(
+        catalog_repo, settings, store):
+    """Every entry in the cascade is an independent scorer call, and against a
+    model-backed scorer each one is a network round trip. Serially, routing
+    latency grows with the catalog; the cascade's *decisions* are unchanged
+    either way, so the calls belong in flight together."""
+    import threading
+
+    from lockbuild.build import build_lock
+
+    lock = build_lock(catalog_repo)
+    in_flight, peak, guard = 0, 0, threading.Lock()
+
+    def scorer(task_text: str, candidate_text: str) -> float:
+        nonlocal in_flight, peak
+        with guard:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            import time
+            time.sleep(0.01)
+            return lexical_scorer(task_text, candidate_text)
+        finally:
+            with guard:
+                in_flight -= 1
+
+    result = route(TASK, lock, catalog_repo, "user@example.com",
+                   scorer, settings, store)
+    assert result.outcome != "error"
+    assert peak > 1

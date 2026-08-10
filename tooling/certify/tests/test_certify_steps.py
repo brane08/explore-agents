@@ -15,7 +15,7 @@ from certify.conformance_list import record
 from certify.playbook import HarnessInputs, criteria_hash
 from certify.candidate import load_candidate
 from certify.steps import step_layout_manifest, step_rebase
-from conftest import LOCK, write_candidate
+from certify_fixtures import LOCK, write_candidate
 
 
 CRITERIA = "BC-1: only error-level records are returned.\nBC-2: tool failure degrades."
@@ -453,6 +453,47 @@ def test_promotion_refuses_unapproved_tag(promo_root):
     assert "brand-new-tag" in result.detail
     assert (promo_root / "agents" / "_proposed" / "log-error-lister").is_dir()
     assert calls["commits"] == []
+
+
+def test_promotion_grant_is_attributed_to_a_specific_run(promo_root):
+    """A constant `granted_by` across every promotion would make trust.yaml's
+    append-only history useless for audit — CATALOG §7's own example
+    (`certify-run-2026-07-12T09:14Z`) ties a grant to the run that made it."""
+    import re as _re
+    import yaml as _yaml
+    result, _ = _promote(promo_root)
+    assert result.passed, result.detail
+    rec = _yaml.safe_load((promo_root / "trust.yaml").read_text(encoding="utf-8"))["records"][0]
+    assert _re.match(r"certify-run-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z", rec["granted_by"])
+
+
+def test_promotion_survives_leftover_source_cleanup_failure(promo_root, monkeypatch):
+    """A successful promotion (dest + trust.yaml + lock durably written) must
+    not be rolled back just because deleting the now-disposable _proposed/
+    source afterward happened to fail — that would destroy the source with no
+    promoted copy to show for it, the exact half-state atomicity exists to
+    prevent."""
+    import shutil as _shutil
+    import yaml as _yaml
+
+    real_rmtree = _shutil.rmtree
+    candidate_dir = promo_root / "agents" / "_proposed" / "log-error-lister"
+
+    def flaky_rmtree(path, *a, **kw):
+        if Path(path) == candidate_dir:
+            raise OSError("simulated cleanup failure")
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(_shutil, "rmtree", flaky_rmtree)
+    result, calls = _promote(promo_root)
+
+    assert result.passed, result.detail
+    assert "failed to remove leftover" in result.detail
+    promoted = promo_root / "agents" / "log-error-lister"
+    assert promoted.is_dir(), "promotion itself must still stand"
+    records = _yaml.safe_load((promo_root / "trust.yaml").read_text(encoding="utf-8"))["records"]
+    assert len(records) == 1 and records[0]["tier"] == "quarantined"
+    assert calls["commits"], "a durable promotion must still be committed"
 
 
 def test_promotion_failure_leaves_no_half_state(promo_root):

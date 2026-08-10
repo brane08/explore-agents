@@ -41,7 +41,7 @@ from orchestrator.errors import CODES, StructuredError
 from orchestrator.executor import ToolInvoker, run_invocation
 from orchestrator.lockload import current_ref, entry_by_id, load_lock_at
 from orchestrator.router import allowed_tiers, route
-from orchestrator.scoring import Scorer, select_scorer
+from orchestrator.scoring import Scorer, ScorerError, select_scorer
 from orchestrator.store import SQLiteStore, Store
 from orchestrator.trustcheck import load_records, transitive_tier
 
@@ -251,8 +251,28 @@ def create_app(
         logger.info("task dispatch session_id=%s invocation_id=%s",
                     session.session_id, invocation.invocation_id)
 
-        result = route(task, lock, settings.catalog_root, session.user_sub,
-                       scorer, settings, store, operator=is_operator(request))
+        try:
+            result = route(task, lock, settings.catalog_root, session.user_sub,
+                           scorer, settings, store, operator=is_operator(request))
+        except ScorerError as exc:
+            # The scorer gates every cascade step. A scorer that cannot answer
+            # must not be rounded down to "no match": that would record a false
+            # PATTERN_UNRECOGNIZED (poisoning the B2 backlog signal) or send
+            # reusable capability to generation. Fail the invocation loudly.
+            logger.warning("scorer unavailable session_id=%s invocation_id=%s: %s",
+                           session.session_id, invocation.invocation_id, exc)
+            store.append_event(invocation.invocation_id, "terminal", {
+                "status": "ERROR", "result_ref": f"scorer unavailable: {exc}",
+            })
+            store.set_invocation(invocation.invocation_id, status="error")
+            response = HTMLResponse(
+                "<p class='error'>Routing scorer unavailable — no routing decision "
+                "was made. Retry, or check ORCH_SCORER configuration.</p>",
+                status_code=503,
+            )
+            if created:
+                attach_cookie(response, session)
+            return response
         _persist_routing(invocation.invocation_id, result.events)
 
         if result.outcome == "error":

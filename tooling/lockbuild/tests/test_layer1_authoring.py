@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from conftest import edit_entry, w, wyaml
+from catalog_fixtures import edit_entry, w, wyaml
 from lockbuild.build import build_lock
 from lockbuild.errors import LockbuildError
 from tests_util import build_text  # thin helper defined in tests_util.py

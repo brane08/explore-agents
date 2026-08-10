@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import yaml
 
-from conftest import TASK, demote_all, rebuild_and_commit
+from orch_fixtures import TASK, demote_all, rebuild_and_commit
 from orchestrator import assembly as assembly_mod
 from orchestrator.trustcheck import load_records, transitive_tier
 from test_layer3_routing import last_invocation, routing_steps
@@ -81,7 +81,7 @@ def test_direct_invoke_refuses_when_a_binding_is_missing_at_the_pin(
     lock_doc["entries"] = [e for e in lock_doc["entries"] if e["id"] != bound]
     (catalog_repo / "catalog.lock.yaml").write_text(
         yaml.safe_dump(lock_doc, sort_keys=True), encoding="utf-8")
-    from conftest import git
+    from orch_fixtures import git
     git(catalog_repo, "add", "-A")
     git(catalog_repo, "commit", "-q", "-m", "drop a bound skill")
 
@@ -161,3 +161,27 @@ def test_stale_best_match_does_not_shadow_a_healthy_agent(client, store, catalog
     assert stale and stale[0]["entry_id"] == agent_id
     # the refusal did not end the cascade
     assert any(s["cascade_step"] in {"b1-coverage", "unrecognized"} for s in steps)
+
+
+def test_a_broken_scorer_refuses_the_task_instead_of_mis_routing(settings, store):
+    """The scorer gates every cascade step. If it cannot answer, rounding it
+    down to 0.0 is a routing decision: below match_threshold the cascade falls
+    through and records a PATTERN_UNRECOGNIZED, poisoning the B2 backlog signal
+    with a gap that does not exist. Refuse the invocation instead."""
+    from fastapi.testclient import TestClient
+
+    from orch_fixtures import fake_invoker
+    from orchestrator.scoring import ScorerError
+    from orchestrator.webapp import create_app
+
+    def broken(task_text: str, candidate_text: str) -> float:
+        raise ScorerError("scorer returned empty content")
+
+    client = TestClient(create_app(settings, store=store, scorer=broken,
+                                   invoke_tool=fake_invoker))
+    client.get("/")
+    r = client.post("/tasks", data={"task": TASK})
+
+    assert r.status_code == 503
+    assert not store.error_records(), "no routing decision was made — record none"
+    assert store.get_invocation(last_invocation(store, client)).status == "error"
