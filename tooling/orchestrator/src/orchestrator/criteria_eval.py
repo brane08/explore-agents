@@ -21,6 +21,22 @@ Two consumers:
   author `ORCH_CRITERIA` selects and prints a JSON report — exit 0 iff every
   case passes. Same contract as the candidate eval runner, for the same reason:
   a prompt change is a change to a graded artifact.
+
+Measured baseline (2026-08-10, `openai/gpt-4o-mini` via OpenRouter, temperature
+0): 5/5 clean corpus runs. Getting there took three prompt defects that only a
+live model exposes — the stub cannot fail this way — each fixed in the prompt
+rather than by loosening a check:
+
+* judgement words ("handles large result sets gracefully");
+* the failure criterion drifting to the empty-result case, so nothing said what
+  happens when the source cannot be read at all;
+* the task's main verb dropped — "summarize the open incidents" produced
+  criteria for *returning incidents in a structured format*, which is a
+  different capability that would have certified green.
+
+Runs still vary at temperature 0 (an unpinned gateway model id is only
+reproducible within one provider), so treat a single clean run as weak
+evidence; the corpus is cheap enough to run several times after a prompt edit.
 """
 from __future__ import annotations
 

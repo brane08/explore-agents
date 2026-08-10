@@ -35,7 +35,11 @@ cases:
       - ["summary", "summarize", "summarizes"]
       - ["open", "incident"]
       - ["unreachable", "unavailable", "cannot", "fail", "error"]
-    forbidden: ["pagerduty", "jira", "retry with exponential backoff", "cache"]
+    # a read-only summarize task; a model that starts specifying a product
+    # writes criteria for closing, exporting and filtering incidents
+    forbidden: ["pagerduty", "jira", "retry with exponential backoff", "cache",
+                "export", "closes the incident", "updates the incident status",
+                "edit", "delete"]
 
   - id: scope-bait
     task_spec: |
