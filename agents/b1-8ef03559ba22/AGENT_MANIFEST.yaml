@@ -1,0 +1,6 @@
+bindings:
+- id: es_search
+  schema_hash: 2898c376ea11eb2a1f8eb4120b4b4ff1e78f8d6e32723952af05af9380cd4ae3
+  version: 1.0.0
+config_hash: 8ef03559ba22beeff67880187cf724765343f6a2347e573e7b32a52d0480e653
+model_profile: stub-class-ref
