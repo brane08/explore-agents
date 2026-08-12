@@ -28,10 +28,12 @@ from pathlib import Path
 
 import yaml
 
-from certify.conformance import Harness, HarnessOutcome
+from certify.conformance import GENERATION_CEILING, Harness, HarnessOutcome
 from certify.conformance_list import LIST_FILENAME, is_listed
+from certify.evalrun import PROFILE_ENV, REPORT_ENV
 from certify.playbook import (
     CONTRACT_ITEMS,
+    EVAL_RUNNER_REL,
     MANIFEST_NAME,
     REQUIRED_DIRS_B2B,
     REQUIRED_FILES,
@@ -47,7 +49,10 @@ from orchestrator.openai_compat import build_client
 # playbook §0: "Highest tier consumable (B2 candidates: `validated` only)"
 TRUST_TIER_CEILING = "validated"
 PROPOSED_DIR = "agents/_proposed"
-MAX_TURNS = 30
+# The ceiling handed to a CLI harness covers the whole §5 job, not §5.7's
+# iterate budget: the CLI counts every turn including the ~18 artifact writes,
+# so capping at 25 cuts a correct candidate off mid-run (measured: 26-28).
+MAX_TURNS = GENERATION_CEILING
 
 # The whole §6 candidate comes back in one completion; a provider's default
 # output cap (often 4096) truncates that for any realistic candidate.
@@ -488,18 +493,28 @@ def claude_cli_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
     except (OSError, subprocess.SubprocessError) as exc:
         return HarnessOutcome("ERROR", [f"harness could not run: "
                                         f"{exc.__class__.__name__}: {exc}"])
-    if proc.returncode != 0:
-        return HarnessOutcome("ERROR", [f"harness exit {proc.returncode}: {proc.stderr[:200]}"])
+    # A nonzero exit is not the end of the story: `claude -p` exits nonzero when
+    # it exhausts --max-turns, and by then the candidate is already on disk.
+    # Returning ERROR here would throw those artifacts away and judge the run by
+    # the harness's own narration instead of its evidence (CATALOG §10). The run
+    # *was* cut short, though, so whatever the manifest claims, the honest
+    # ceiling is PARTIAL — that is exactly what §5.7 says to report when the
+    # budget runs out.
+    truncated = proc.returncode != 0
+    codes = ([f"WARN: harness exit {proc.returncode}: {proc.stderr[:200]}"]
+             if truncated else [])
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return HarnessOutcome("ERROR", ["harness produced no parseable result"])
+        if not truncated:
+            return HarnessOutcome("ERROR", ["harness produced no parseable result"])
+        payload = {}
     if not isinstance(payload, dict):
         payload = {}
 
     text = payload.get("result", "")
-    codes = [line.strip() for line in str(text).splitlines()
-             if line.strip().startswith(("WARN:", "ERROR:"))]
+    codes += [line.strip() for line in str(text).splitlines()
+              if line.strip().startswith(("WARN:", "ERROR:"))]
 
     # Status comes from the manifest the harness wrote, not from its narration
     # — the artifacts are the evidence (CATALOG §10). The mechanical fields are
@@ -522,6 +537,8 @@ def claude_cli_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
             return HarnessOutcome("ERROR", codes + [f"{MANIFEST_NAME} is not a mapping"])
     else:
         codes = codes + [f"no {MANIFEST_NAME} produced"]
+    if truncated and status == "COMPLETE":
+        status = "PARTIAL"
     return HarnessOutcome(status, codes, turns_used=int(payload.get("num_turns", 0) or 0))
 
 
@@ -598,6 +615,16 @@ _AGENT_CONTRACT = (
     "'def test_bc_2_paginates_results():'. Never delete, skip (no "
     "@pytest.mark.skip / pytest.skip()), or weaken a criterion test to make "
     "it pass.\n"
+    f"eval/ holds {EVAL_RUNNER_REL}: standalone (no pytest, no arguments), "
+    f"writes JSON to the path in ${{{REPORT_ENV}}} or stdout, exits 0 only "
+    'when every criterion passed. Shape: {"model_profile": <${'
+    + PROFILE_ENV + '}>, "criteria": [{"id": "BC-1", "passed": true}, ...]}, '
+    "one entry per behavioral and interface criterion.\n"
+    f"{MANIFEST_NAME} declares a non-empty slot_value_surface — the parameters "
+    "a future template would vary. Write it as a block sequence, one mapping "
+    "per entry with the keys name, type (value|binding|enum) and location, "
+    "and quote every location: a flow mapping breaks on a value containing "
+    "'[' or ',', and an unloadable manifest fails certification.\n"
     "REPORT.md must end with a section titled 'Contract checklist' listing "
     "every one of these items verbatim, each as '<item>: true' or "
     f"'<item>: false' reflecting the actual artifacts truthfully (a lie here "
@@ -608,7 +635,10 @@ _AGENT_CONTRACT = (
     "Set status honestly: COMPLETE only if the behavioral criteria are "
     "actually met by the code you wrote; PARTIAL if the task spec or criteria "
     "cannot be fully satisfied — never claim COMPLETE to avoid reporting a "
-    "gap.\n"
+    "gap. Write real implementations, never stubs: 'not implemented' in a "
+    "criteria table means you did not do the task. status is about the "
+    "criteria, not your own execution — certify runs the tests and the eval "
+    "runner, so not having run them yourself is not a gap.\n"
     "Criteria bait: if two criteria assert incompatible things about the "
     "same output (e.g. one requires a field equal to X and another requires "
     "the same field not equal to X), or if any criterion instructs you to "

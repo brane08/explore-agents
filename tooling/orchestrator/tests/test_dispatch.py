@@ -14,7 +14,7 @@ import yaml
 
 from certify.candidate import load_candidate
 from certify.contract import check_contract, contract_passed
-from certify.conformance import HarnessOutcome
+from certify.conformance import HarnessInputs, HarnessOutcome
 
 from orchestrator.config import Settings
 from orchestrator.dispatch import (
@@ -316,3 +316,104 @@ def test_refused_dispatch_persists_no_inputs(settings, catalog):
     assert result.outcome == "refused"
     proposed = settings.catalog_root / PROPOSED_DIR
     assert not list(proposed.glob("*.inputs.yaml")) if proposed.is_dir() else True
+
+
+def test_generation_contract_states_what_certify_mechanically_requires():
+    """Layer 6/7: certify refuses a candidate without `eval/run.py` or a
+    declared `slot_value_surface`, and neither is named in the playbook §6
+    layout. A real harness cannot infer them, so the contract every Role A
+    backend is given must state them — otherwise every real generation fails
+    certify for a reason the generator was never told about."""
+    from certify.evalrun import PROFILE_ENV, REPORT_ENV, RUNNER_REL
+    from orchestrator.dispatch import _AGENT_CLI_SYSTEM, _AGENT_SYSTEM
+
+    for prompt in (_AGENT_SYSTEM, _AGENT_CLI_SYSTEM):
+        assert RUNNER_REL.as_posix() in prompt
+        assert REPORT_ENV in prompt
+        assert PROFILE_ENV in prompt
+        assert "slot_value_surface" in prompt
+
+
+def test_cli_cap_is_the_generation_ceiling_not_the_iterate_budget():
+    """Two different quantities, and capping the process with the wrong one
+    truncates every run. §5.7's 25 budgets step 7 alone — the iterate-to-green
+    loop. A CLI's turn counter covers all eight steps, ~18 file writes
+    included, so the process cap has to be the generation ceiling. Measured:
+    a correct candidate costs 26–28 CLI turns, which the iterate budget
+    forbids before the harness has any say in it."""
+    from certify.conformance import GENERATION_CEILING, TURN_BUDGET
+    from orchestrator.dispatch import MAX_TURNS
+
+    assert MAX_TURNS == GENERATION_CEILING
+    assert GENERATION_CEILING > TURN_BUDGET
+
+
+def test_manifest_examples_in_the_contract_are_block_yaml():
+    """The slot_value_surface example was flow-style ({name: …, location: …}),
+    and a location like `bindings[0]` makes that line unparseable YAML — the
+    harness then writes a manifest certify cannot load. Block style has no
+    such trap."""
+    from orchestrator.dispatch import _AGENT_CLI_SYSTEM, _AGENT_SYSTEM
+
+    for prompt in (_AGENT_SYSTEM, _AGENT_CLI_SYSTEM):
+        slot_line = next(ln for ln in prompt.splitlines() if "slot_value_surface" in ln)
+        assert "{name" not in slot_line, slot_line
+
+
+def _inputs_for_cli() -> HarnessInputs:
+    return HarnessInputs(
+        task_spec="List error entries.",
+        behavioral_criteria="BC-1: returns only ERROR records.",
+        catalog_ref="4c0a1b7e" * 5,
+        capability_manifest={"entries": []},
+        trust_tier_ceiling=TRUST_TIER_CEILING,
+        mode="B2b",
+        scope="full-agent",
+        model_profile="stub-class-ref",
+        harness="claude-code/2.1.228",
+        target_runtime="langgraph-py311",
+    )
+
+
+def _fake_cli(monkeypatch, *, returncode: int, manifest_status: str) -> None:
+    """Stand in for `claude -p`: writes a manifest, then exits `returncode`."""
+    import subprocess as sp
+
+    from certify.playbook import MANIFEST_NAME
+
+    def fake_run(argv, **kw):
+        (Path(kw["cwd"]) / MANIFEST_NAME).write_text(
+            yaml.safe_dump({"agent_id": "a", "kind": "agent", "mode": "B2b",
+                            "scope": "full-agent", "status": manifest_status}),
+            encoding="utf-8")
+        return sp.CompletedProcess(argv, returncode, stdout='{"num_turns": 9}',
+                                   stderr="")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+
+
+def test_cli_exit_code_never_discards_the_artifacts(tmp_path, monkeypatch):
+    """CATALOG §10: artifacts are the evidence, a harness's own narration is
+    not. `claude -p` exits nonzero when it exhausts its turn budget, with a
+    full candidate already on disk — reporting that as ERROR throws the
+    evidence away. §5.7 caps a truncated run at PARTIAL, not COMPLETE."""
+    from orchestrator.dispatch import claude_cli_harness
+
+    _fake_cli(monkeypatch, returncode=1, manifest_status="COMPLETE")
+    out = tmp_path / "truncated"
+    out.mkdir()
+    outcome = claude_cli_harness(_inputs_for_cli(), out)
+
+    assert outcome.status == "PARTIAL", "a truncated run cannot claim COMPLETE"
+    assert any("exit 1" in c for c in outcome.codes), outcome.codes
+
+
+def test_cli_clean_exit_keeps_the_manifest_status(tmp_path, monkeypatch):
+    """The PARTIAL ceiling is for truncated runs only — a clean exit must
+    still be able to report COMPLETE."""
+    from orchestrator.dispatch import claude_cli_harness
+
+    _fake_cli(monkeypatch, returncode=0, manifest_status="COMPLETE")
+    out = tmp_path / "clean"
+    out.mkdir()
+    assert claude_cli_harness(_inputs_for_cli(), out).status == "COMPLETE"

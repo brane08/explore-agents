@@ -89,6 +89,8 @@ def write_candidate(
     tests_body: str | None = None,
     src_body: str | None = None,
     eval_body: str | None = None,
+    eval_runner: bool = True,
+    slot_surface: bool = True,
     extra_files: dict[str, str] | None = None,
     trace: bool = True,
     target_slot: dict | None = None,
@@ -115,9 +117,12 @@ def write_candidate(
             for b in bindings
         ],
         "trust_tier_consumed": "validated",
-        "slot_value_surface": [{"name": "level", "type": "value", "location": "config.level"}],
         "status": status,
     }
+    if slot_surface:
+        manifest["slot_value_surface"] = [
+            {"name": "level", "type": "value", "location": "config.level"}
+        ]
     if interface_ref:
         manifest["interface_criteria_ref"] = criteria_hash("IC-1: returns a list.")
     if inputs.residual:
@@ -143,7 +148,10 @@ def write_candidate(
            "def test_bc_1_only_error_records():\n    assert True\n\n\n"
            "def test_bc_2_tool_failure_degrades():\n    assert True\n\n\n"
            "def test_ic_1_returns_list():\n    assert True\n")
-    _write(out / "eval" / "run.py", EVAL_RUNNER if eval_body is None else eval_body)
+    if eval_runner:
+        _write(out / "eval" / "run.py", EVAL_RUNNER if eval_body is None else eval_body)
+    else:
+        _write(out / "eval" / "__init__.py", "")
     if trace:
         _write(out / "trace" / "turns.jsonl", '{"turn": 1, "action": "plan"}\n')
 
@@ -280,6 +288,25 @@ def budget_burner_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
         return HarnessOutcome("ERROR", ["MISSING_INPUT"])
     write_candidate(out, inputs)
     return HarnessOutcome("COMPLETE", [], turns_used=99)
+
+
+def no_eval_runner_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
+    """Populates `eval/` with a placeholder instead of the runner certify
+    executes — the shape a real harness produces when nothing told it the
+    runner's entry point."""
+    if inputs.missing():
+        return HarnessOutcome("ERROR", ["MISSING_INPUT"])
+    write_candidate(out, inputs, eval_runner=False)
+    return HarnessOutcome("COMPLETE", [], turns_used=6)
+
+
+def no_slot_surface_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
+    """Omits `slot_value_surface` from the manifest — certifiably broken at
+    step 4, so conformance must catch it here."""
+    if inputs.missing():
+        return HarnessOutcome("ERROR", ["MISSING_INPUT"])
+    write_candidate(out, inputs, slot_surface=False)
+    return HarnessOutcome("COMPLETE", [], turns_used=6)
 
 
 def improviser_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:

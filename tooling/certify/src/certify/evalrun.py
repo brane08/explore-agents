@@ -40,7 +40,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-RUNNER_REL = Path("eval") / "run.py"
+from certify.playbook import EVAL_RUNNER_REL
+
+RUNNER_REL = Path(EVAL_RUNNER_REL)
 REPORT_ENV = "EVAL_REPORT"
 PROFILE_ENV = "MODEL_PROFILE"
 TIMEOUT_ENV = "CERTIFY_EVAL_TIMEOUT"
