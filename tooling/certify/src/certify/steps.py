@@ -381,6 +381,28 @@ def step_model_diversity(*, judge_model: str, criteria_model: str,
     return StepResult(step, True, f"families differ; config_hash={config_hash}")
 
 
+def _unapproved_tags(tags, vocabulary: set[str]) -> list[str]:
+    """Tag names that a human has not approved (CATALOG §8.7).
+
+    The playbook (§6) tells Role A to write new tags flagged `proposed: true`,
+    so a real draft carries mappings; the bare-string shape is still accepted.
+    A tag is unapproved if it is outside `tags.yaml` *or* Role A flagged it as
+    invented — the flag is the candidate's own declaration that the tag is new,
+    and honouring only the vocabulary would admit it on a name collision.
+    """
+    unapproved: set[str] = set()
+    for tag in tags or []:
+        if isinstance(tag, dict):
+            name = str(tag.get("name", "")).strip()
+            if name and (bool(tag.get("proposed")) or name not in vocabulary):
+                unapproved.add(name)
+        else:
+            name = str(tag).strip()
+            if name and name not in vocabulary:
+                unapproved.add(name)
+    return sorted(unapproved)
+
+
 def promote(
     *,
     catalog_root: Path,
@@ -424,7 +446,7 @@ def promote(
     tags_file = catalog_root / "tags.yaml"
     vocabulary = set((yaml.safe_load(tags_file.read_text(encoding="utf-8")) or {})
                      .get("tags", [])) if tags_file.is_file() else set()
-    proposed = sorted(set(draft.get("capability_tags", [])) - vocabulary)
+    proposed = _unapproved_tags(draft.get("capability_tags", []), vocabulary)
     if proposed:
         return StepResult(step, False,
                           f"proposed capability_tags {proposed} are not in tags.yaml — "
