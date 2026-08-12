@@ -1,21 +1,26 @@
-# Orchestrator-owned trust ledger. Written ONLY by tooling/certify or recorded human
-# override. Append-only. Key: (id, version, model_profile). See docs/CATALOG.md §7.
 records:
-  - id: es_search
-    version: 1.0.0
-    model_profile: stub-class-ref
-    tier: validated
-    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
-    evidence: recorded-human-override (Phase 1 seed; session-authorized)
-  - id: es_aggregate
-    version: 1.0.0
-    model_profile: stub-class-ref
-    tier: validated
-    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
-    evidence: recorded-human-override (Phase 1 seed; session-authorized)
-  - id: field_stats
-    version: 1.0.0
-    model_profile: stub-class-ref
-    tier: validated
-    granted_by: human-override:ekpravasi@gmail.com/2026-07-15
-    evidence: recorded-human-override (Phase 1 seed; session-authorized)
+- evidence: recorded-human-override (Phase 1 seed; session-authorized)
+  granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+  id: es_search
+  model_profile: stub-class-ref
+  tier: validated
+  version: 1.0.0
+- evidence: recorded-human-override (Phase 1 seed; session-authorized)
+  granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+  id: es_aggregate
+  model_profile: stub-class-ref
+  tier: validated
+  version: 1.0.0
+- evidence: recorded-human-override (Phase 1 seed; session-authorized)
+  granted_by: human-override:ekpravasi@gmail.com/2026-07-15
+  id: field_stats
+  model_profile: stub-class-ref
+  tier: validated
+  version: 1.0.0
+- evidence: certify steps green; harness=claude-code/2.1.228; catalog_ref=4a7408de3a6aa3262da2ffb51129ed63f52ad4e1;
+    eval=dcb106724bf0396c4e4e7ab234aafb4fe9d98d446dc0cd8cd006d60d271c3ff5 (2 criteria)
+  granted_by: certify-run-2026-08-12T14:55Z
+  id: cron-next-fire-times
+  model_profile: stub-class-ref
+  tier: quarantined
+  version: 0.1.0

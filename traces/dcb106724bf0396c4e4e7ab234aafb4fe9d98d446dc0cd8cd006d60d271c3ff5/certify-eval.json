@@ -1,0 +1,17 @@
+{
+  "criteria": [
+    {
+      "id": "BC-1",
+      "passed": true
+    },
+    {
+      "id": "BC-2",
+      "passed": true
+    }
+  ],
+  "detail": "",
+  "exit_code": 0,
+  "model_profile": "stub-class-ref",
+  "passed": true,
+  "runner": "eval/run.py"
+}
