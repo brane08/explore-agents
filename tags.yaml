@@ -10,3 +10,5 @@ tags:
   - report-sink
   - http-fetch
   - file-io
+  - cron-scheduling
+  - time-computation
