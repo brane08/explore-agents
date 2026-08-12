@@ -55,20 +55,30 @@ _ENV_FIELDS = {
 }
 
 
+def _env(name: str) -> str | None:
+    """Blank means unset: `.env.example` ships the optional keys empty and
+    documents them as defaults, and `source .env` exports those as empty
+    strings. Treating "" as a value makes the shipped template unstartable."""
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
 def settings_from_env() -> Settings:
     """Env overrides on top of the dataclass defaults — the dataclass is the
     single source of truth for default values."""
-    root = Path(os.environ.get("ORCH_CATALOG_ROOT", ".")).resolve()
+    root = Path(_env("ORCH_CATALOG_ROOT") or ".").resolve()
     kwargs: dict = {
         "catalog_root": root,
-        "db_path": Path(os.environ.get("ORCH_DB_PATH", str(root / "orchestrator.sqlite3"))),
+        "db_path": Path(_env("ORCH_DB_PATH") or str(root / "orchestrator.sqlite3")),
     }
     for env_name, (field_name, cast) in _ENV_FIELDS.items():
-        if env_name in os.environ:
-            kwargs[field_name] = cast(os.environ[env_name])
-    if "ORCH_OPERATOR_USERS" in os.environ:
+        raw = _env(env_name)
+        if raw is not None:
+            kwargs[field_name] = cast(raw)
+    operators = _env("ORCH_OPERATOR_USERS")
+    if operators is not None:
         kwargs["operator_users"] = tuple(
-            u for u in os.environ["ORCH_OPERATOR_USERS"].split(",") if u
+            u.strip() for u in operators.split(",") if u.strip()
         )
     settings = Settings(**kwargs)
     if settings.secret_key == INSECURE_DEFAULT_SECRET_KEY:
