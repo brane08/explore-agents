@@ -753,14 +753,27 @@ def test_promotion_accepts_flagged_shape_when_every_tag_is_approved(promo_root):
     assert result.passed, result.detail
 
 
-def test_promotion_refuses_a_tag_flagged_proposed_even_if_it_is_in_tags_yaml(promo_root):
-    """CATALOG §8.7: proposed tags require human approval. The flag is Role A
-    saying it invented the tag; honouring the vocabulary alone would let a
-    self-declared new tag through on a name collision."""
-    _set_draft_tags(promo_root, [{"name": "log-source", "proposed": True}])
-    result, _ = _promote(promo_root)
-    assert not result.passed
-    assert "log-source" in result.detail
+def test_operator_approval_in_tags_yaml_unblocks_a_proposed_tag(promo_root):
+    """The whole point of the refusal is that a human can resolve it. The draft
+    is frozen at generation time, so if the `proposed` flag itself blocked
+    promotion, approving the tag in tags.yaml could never take effect and the
+    candidate would be unpromotable forever. Approval is membership in
+    tags.yaml (CATALOG §8.7); the flag says what to review, not what to veto."""
+    import yaml as _yaml
+    _set_draft_tags(promo_root, [
+        {"name": "log-source", "proposed": False},
+        {"name": "cron-scheduling", "proposed": True},
+    ])
+    assert not _promote(promo_root)[0].passed  # before approval
+
+    tags_file = promo_root / "tags.yaml"
+    data = _yaml.safe_load(tags_file.read_text(encoding="utf-8"))
+    data["tags"].append("cron-scheduling")
+    tags_file.write_text(_yaml.safe_dump(data), encoding="utf-8")
+
+    result, calls = _promote(promo_root)
+    assert result.passed, result.detail
+    assert calls["lockbuild"] == 1
 
 
 def test_promotion_still_refuses_an_unflagged_unapproved_tag(promo_root):

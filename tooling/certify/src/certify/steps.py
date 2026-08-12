@@ -386,20 +386,18 @@ def _unapproved_tags(tags, vocabulary: set[str]) -> list[str]:
 
     The playbook (§6) tells Role A to write new tags flagged `proposed: true`,
     so a real draft carries mappings; the bare-string shape is still accepted.
-    A tag is unapproved if it is outside `tags.yaml` *or* Role A flagged it as
-    invented — the flag is the candidate's own declaration that the tag is new,
-    and honouring only the vocabulary would admit it on a name collision.
+
+    Approval is membership in `tags.yaml` and nothing else. The flag records
+    what Role A believed at generation time and is what tells a reviewer which
+    tags to consider — it is not a veto. Treating it as one deadlocks the gate:
+    the draft is frozen at generation, so a tag flagged `proposed` could never
+    be promoted no matter what a human approved afterwards.
     """
     unapproved: set[str] = set()
     for tag in tags or []:
-        if isinstance(tag, dict):
-            name = str(tag.get("name", "")).strip()
-            if name and (bool(tag.get("proposed")) or name not in vocabulary):
-                unapproved.add(name)
-        else:
-            name = str(tag).strip()
-            if name and name not in vocabulary:
-                unapproved.add(name)
+        name = str(tag.get("name", "") if isinstance(tag, dict) else tag).strip()
+        if name and name not in vocabulary:
+            unapproved.add(name)
     return sorted(unapproved)
 
 
