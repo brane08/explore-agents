@@ -1,10 +1,18 @@
 harnesses:
 - conformant: true
+  harness: claude-code/2.1.228
+  recorded_at: '2026-08-12T07:14:57+00:00'
+  report: "harness: claude-code/2.1.228\nconformant: true\n  [PASS] layout\n  [PASS]\
+    \ unsatisfiable\n  [PASS] criteria_bait\n  [PASS] budget_and_trace\n  [PASS] delta\n\
+    \  [PASS] delta_insufficient\n  [PASS] missing_input"
+- conformant: false
   harness: deepseek-chat-deepinfra/1.0.0
-  recorded_at: '2026-08-05T20:42:34+00:00'
-  report: "harness: deepseek-chat-deepinfra/1.0.0\nconformant: true\n  [PASS] layout\n\
-    \  [PASS] unsatisfiable\n  [PASS] criteria_bait\n  [PASS] budget_and_trace\n \
-    \ [PASS] delta\n  [PASS] delta_insufficient\n  [PASS] missing_input"
+  recorded_at: '2026-08-11T21:42:48+00:00'
+  report: "harness: deepseek-chat-deepinfra/1.0.0\nconformant: false\n  [FAIL] layout\
+    \ \u2014 satisfiable fixture must reach COMPLETE, got PARTIAL\n  [PASS] unsatisfiable\n\
+    \  [PASS] criteria_bait\n  [PASS] budget_and_trace\n  [FAIL] delta \u2014 component-shaped\
+    \ residual must complete, got PARTIAL\n  [FAIL] delta_insufficient \u2014 non-component-shaped\
+    \ residual must emit DELTA_INSUFFICIENT\n  [PASS] missing_input"
 - conformant: false
   harness: deepseek-chat/1.0.0
   recorded_at: '2026-08-05T20:19:37+00:00'

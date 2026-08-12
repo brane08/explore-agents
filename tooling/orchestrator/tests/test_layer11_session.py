@@ -5,7 +5,7 @@ import pytest
 from itsdangerous import Signer
 
 from orch_fixtures import rebuild_and_commit
-from orchestrator.config import Settings
+from orchestrator.config import Settings, settings_from_env
 from orchestrator.webapp import SESSION_COOKIE
 
 
@@ -54,6 +54,25 @@ def test_exactly_one_auth_mode(settings, tmp_path):
     with pytest.raises(NotImplementedError):
         Settings(catalog_root=settings.catalog_root, db_path=tmp_path / "x.db",
                  auth_mode="oidc")
+
+
+def test_blank_env_values_fall_back_to_defaults(monkeypatch, tmp_path):
+    """`.env.example` ships the optional keys blank and documents them as
+    "unset". Sourcing that file exports empty strings, so a blank value must
+    mean the default — otherwise the shipped template cannot start the app."""
+    monkeypatch.setenv("ORCH_CATALOG_ROOT", str(tmp_path))
+    for blank in ("ORCH_DB_PATH", "ORCH_MODEL_PROFILE", "ORCH_HARNESS_ID",
+                  "ORCH_SECRET_KEY", "ORCH_AUTH_MODE", "ORCH_MATCH_THRESHOLD"):
+        monkeypatch.setenv(blank, "")
+
+    settings = settings_from_env()
+
+    defaults = Settings(catalog_root=tmp_path, db_path=tmp_path / "x.db")
+    assert settings.db_path == tmp_path / "orchestrator.sqlite3"
+    assert settings.model_profile == defaults.model_profile
+    assert settings.harness_id == defaults.harness_id
+    assert settings.auth_mode == defaults.auth_mode
+    assert settings.match_threshold == defaults.match_threshold
 
 
 def test_sse_timeout_budget_covers_max_runtime(settings, tmp_path):

@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from certify.candidate import Candidate, load_candidate
+from certify.evalrun import (
+    EVIDENCE_NAME,
+    EvalRunner,
+    load_eval_evidence,
+    persist_eval_evidence,
+    subprocess_runner,
+)
 from certify.contract import (
     check_bindings,
     check_criteria_refs,
@@ -31,6 +38,7 @@ class StepResult:
     step: str
     passed: bool
     detail: str = ""
+    evidence: dict = field(default_factory=dict)
 
 
 def step_layout_manifest(candidate: Candidate, inputs: HarnessInputs,
@@ -94,6 +102,122 @@ def step_rebase(candidate: Candidate, current_lock: dict) -> StepResult:
                               f"catalog_ref ({b.version}/{b.schema_hash[:12]} vs "
                               f"{entry['version']}/{str(entry['hash'])[:12]})")
     return StepResult(step, True)
+
+
+def step_status(candidate: Candidate) -> StepResult:
+    """Reported status — only `COMPLETE` is certifiable (playbook §7).
+
+    §7's contract checklist ends "Any `false` → status cannot be `COMPLETE`",
+    so a harness that reports `PARTIAL` is telling certify that at least one
+    criterion is unmet or one contract line is false. That is the *desired*
+    behaviour — "honest PARTIAL is acceptable; false COMPLETE is a
+    certification-integrity violation" — and the way to keep it desirable is
+    that an honest PARTIAL still does not promote. Certifying one would make
+    the honest answer and the false one lead to the same place, which is
+    exactly the pressure §7 exists to remove.
+    """
+    step = "status"
+    if not candidate.ok:
+        return StepResult(step, False,
+                          "; ".join(candidate.load_errors) or "unloadable candidate")
+    status = candidate.manifest.status
+    if status == "COMPLETE":
+        return StepResult(step, True)
+    if status == "PARTIAL":
+        return StepResult(step, False,
+                          "harness reported PARTIAL — an honest PARTIAL is a valid "
+                          "generation outcome but not a certifiable one (§7: any "
+                          "false checklist item ⇒ not COMPLETE); rebuild or reduce "
+                          "scope, do not certify around it")
+    return StepResult(step, False,
+                      f"status {status!r} is not COMPLETE — nothing to certify")
+
+
+def step_eval(
+    candidate: Candidate,
+    *,
+    runner: EvalRunner | None = None,
+    security: StepResult | None = None,
+    persist: bool = True,
+) -> StepResult:
+    """Step 3 — the candidate's own eval suite, on the manifest's profile.
+
+    Green *and* evidence: a run whose per-criterion results were not captured is
+    refused, because the value of `eval/` is that a profile migration reruns it
+    and compares against a recorded baseline (layer 8: class migration =
+    eval-rerun, never inherited evidence). The evidence is persisted into
+    `trace/`, which promotion moves to content-addressed storage.
+
+    Numbered 3, but it runs *last* among the mechanical steps: it executes
+    candidate-authored code, so `security` carries the static scan's result and
+    this refuses to run behind a failed one. The rule lives here rather than at
+    each call site — a caller that got the ordering wrong would execute code
+    certify had already flagged. See `evalrun` for the runner contract and for
+    what this is not (a sandbox).
+    """
+    step = "eval"
+    if security is not None and not security.passed:
+        return StepResult(step, False,
+                          "not run: the static security scan must pass first — "
+                          f"step 3 executes candidate code ({security.detail})")
+    if not candidate.ok:
+        return StepResult(step, False,
+                          "; ".join(candidate.load_errors) or "unloadable candidate")
+
+    profile = candidate.manifest.model_profile
+    if not profile:
+        return StepResult(step, False,
+                          "manifest declares no model_profile — eval evidence is "
+                          "only valid for the profile it ran on")
+
+    outcome = (runner or subprocess_runner)(candidate.path, profile)
+    criteria = list((outcome.report or {}).get("criteria") or [])
+    evidence = {
+        "runner": "eval/run.py",
+        "model_profile": profile,
+        "exit_code": outcome.exit_code,
+        "criteria": criteria,
+        "passed": False,
+        "detail": "",
+    }
+
+    def done(passed: bool, detail: str = "") -> StepResult:
+        evidence["passed"] = passed
+        evidence["detail"] = detail
+        if persist:
+            persist_eval_evidence(candidate.path, evidence)
+        return StepResult(step, passed, detail, evidence)
+
+    if outcome.exit_code is None:
+        return done(False, outcome.detail or "the eval runner produced no exit code")
+    if outcome.report is None:
+        return done(False,
+                    f"exited {outcome.exit_code} with no per-criterion report "
+                    f"(playbook §5: JSON report via ${{EVAL_REPORT}} or stdout)"
+                    + (f"; stderr: {outcome.detail}" if outcome.detail else ""))
+    if not criteria:
+        return done(False, "the eval report lists no criteria — no evidence to "
+                           "rerun against after a profile migration")
+
+    reported_profile = outcome.report.get("model_profile")
+    if reported_profile and reported_profile != profile:
+        return done(False,
+                    f"eval ran on profile {reported_profile!r} but the manifest "
+                    f"declares {profile!r} — evidence is not transferable")
+
+    failed = [str(c.get("id")) for c in criteria if not c.get("passed")]
+    if failed and outcome.exit_code == 0:
+        return done(False,
+                    f"runner reported exit 0 while its own report fails {failed} "
+                    "— the exit code is a claim, the report is the evidence")
+    if failed:
+        return done(False, f"failing criteria: {failed}")
+    if outcome.exit_code != 0:
+        return done(False,
+                    f"runner exited {outcome.exit_code} with every criterion "
+                    "reported green"
+                    + (f"; stderr: {outcome.detail}" if outcome.detail else ""))
+    return done(True)
 
 
 def select_evalmatrix_rows(
@@ -207,7 +331,7 @@ def step_security_static(candidate: Candidate, inputs: HarnessInputs) -> StepRes
     return StepResult(step, True)
 
 
-def _family(model_id: str) -> str:
+def model_family(model_id: str) -> str:
     """Leading token of the *model*, not the routing vendor.
 
     Gateway ids namespace by vendor (`anthropic/claude-3.5-sonnet`) and local
@@ -241,7 +365,7 @@ def step_model_diversity(*, judge_model: str, criteria_model: str,
               f"impl_profile={impl_profile.get('id', '')}\n")
     config_hash = hashlib.sha256(config.encode("utf-8")).hexdigest()[:16]
 
-    impl_family = _family(str(impl_profile.get("profile_class", "")))
+    impl_family = model_family(str(impl_profile.get("profile_class", "")))
     if impl_profile.get("provider") == "local" or impl_family in {"", "stub", "local"}:
         return StepResult(step, True,
                           f"impl family indeterminate ({impl_profile.get('provider')}/"
@@ -249,12 +373,85 @@ def step_model_diversity(*, judge_model: str, criteria_model: str,
                           f"comparable (feasibility clause); config_hash={config_hash}")
 
     for role, model in (("judge", judge_model), ("criteria-author", criteria_model)):
-        if _family(model) == impl_family:
+        if model_family(model) == impl_family:
             return StepResult(step, False,
                               f"{role} model {model!r} shares family {impl_family!r} "
                               "with the implementation profile — same-family "
                               f"self-agreement is a gate weakness; config_hash={config_hash}")
     return StepResult(step, True, f"families differ; config_hash={config_hash}")
+
+
+def _unapproved_tags(tags, vocabulary: set[str]) -> list[str]:
+    """Tag names that a human has not approved (CATALOG §8.7).
+
+    The playbook (§6) tells Role A to write new tags flagged `proposed: true`,
+    so a real draft carries mappings; the bare-string shape is still accepted.
+
+    Approval is membership in `tags.yaml` and nothing else. The flag records
+    what Role A believed at generation time and is what tells a reviewer which
+    tags to consider — it is not a veto. Treating it as one deadlocks the gate:
+    the draft is frozen at generation, so a tag flagged `proposed` could never
+    be promoted no matter what a human approved afterwards.
+    """
+    return sorted({n for n in _tag_names(tags) if n not in vocabulary})
+
+
+def _tag_names(tags) -> list[str]:
+    """Tag names from either shape: bare strings, or the {name, proposed}
+    mappings playbook §6 tells Role A to write for new tags."""
+    names = []
+    for tag in tags or []:
+        name = str(tag.get("name", "") if isinstance(tag, dict) else tag).strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _generate_entry(draft: dict, manifest, vocabulary: set[str],
+                    routing_summary: str) -> dict:
+    """Build `entry.yaml` from the certified artifacts (CATALOG §8.7).
+
+    Generated field by field, never copied from the draft. `entry.draft.yaml`
+    is Role A's *advisory* proposal and carries things a catalog entry must not
+    have: `trust_tier` (orchestrator-owned — CHECKLISTS layer 1 forbids it in
+    an entry), `assembly: b2` (the schema's `assembly` marks b1 config-only
+    registrations), draft-only prose fields, and tags still flagged `proposed`.
+    Copying it wholesale produced an entry the lock's own schema rejects, so
+    promotion built a catalog it could not then load.
+
+    What carries over is what §8.7 names: the regenerated routing_summary, the
+    approved tags, model_requirements, detail. Bindings come from the manifest
+    — those are the ones step 5 audited against the trust ceiling; the draft's
+    copy is unverified.
+    """
+    entry: dict = {
+        "id": manifest.agent_id,
+        "kind": manifest.kind,
+        "version": str(draft.get("version", "1.0.0")),
+        "routing_summary": routing_summary,
+        # Every tag is approved by now, so each is a plain name: `proposed` is
+        # `Literal[True]` in the schema, i.e. only an *unapproved* tag may
+        # carry the flag, and one of those never reaches this point.
+        "capability_tags": sorted(
+            {n for n in _tag_names(draft.get("capability_tags", []))
+             if n in vocabulary}),
+        "detail": str(draft.get("detail", "") or ""),
+    }
+    bindings = [{"id": b.id, "version": b.version} for b in manifest.bindings]
+    if bindings:
+        entry["bindings"] = bindings
+    requirements = dict(draft.get("model_requirements") or {})
+    if manifest.model_profile:
+        requirements.setdefault("profile", manifest.model_profile)
+    if requirements:
+        entry["model_requirements"] = requirements
+    delegation = list(draft.get("delegation_requirements") or [])
+    if delegation:
+        entry["delegation_requirements"] = delegation
+    conforms = draft.get("conforms_to") or {}
+    if conforms and manifest.kind == "component":
+        entry["conforms_to"] = conforms
+    return entry
 
 
 def promote(
@@ -300,11 +497,36 @@ def promote(
     tags_file = catalog_root / "tags.yaml"
     vocabulary = set((yaml.safe_load(tags_file.read_text(encoding="utf-8")) or {})
                      .get("tags", [])) if tags_file.is_file() else set()
-    proposed = sorted(set(draft.get("capability_tags", [])) - vocabulary)
+    proposed = _unapproved_tags(draft.get("capability_tags", []), vocabulary)
     if proposed:
         return StepResult(step, False,
                           f"proposed capability_tags {proposed} are not in tags.yaml — "
                           "new tags require human approval before promotion")
+
+    status = step_status(candidate)
+    if not status.passed:
+        return StepResult(step, False, status.detail)
+
+    # Layer 7 [M]: eval green on the manifest's profile, evidence captured.
+    # Promotion is the last point where that can still be enforced — after it,
+    # the candidate is a catalog entry and the question is closed.
+    evidence = load_eval_evidence(candidate_dir)
+    if evidence is None:
+        return StepResult(step, False,
+                          "no eval evidence in trace/ — step 3 has not run; a "
+                          "candidate whose own eval suite was never executed is "
+                          "not certifiable")
+    if not evidence.get("passed"):
+        return StepResult(step, False,
+                          f"eval evidence is red: {evidence.get('detail') or 'failed'}")
+    if evidence.get("model_profile") != m.model_profile:
+        return StepResult(step, False,
+                          f"eval evidence is for profile "
+                          f"{evidence.get('model_profile')!r}, manifest declares "
+                          f"{m.model_profile!r} — evidence is not inherited across "
+                          "profiles (layer 8)")
+    eval_digest = hashlib.sha256(
+        (candidate_dir / "trace" / EVIDENCE_NAME).read_bytes()).hexdigest()
 
     dest = catalog_root / "agents" / m.agent_id
     if dest.exists():
@@ -347,12 +569,8 @@ def promote(
                 stored_traces.append(target)
             shutil.rmtree(trace_dir)
 
-        entry = dict(draft)
-        entry["routing_summary"] = summary_writer(
-            (candidate_dir / "SPEC.md").read_text(encoding="utf-8"), m)
-        if m.model_profile:
-            entry.setdefault("model_requirements", {})
-            entry["model_requirements"].setdefault("profile", m.model_profile)
+        entry = _generate_entry(draft, m, vocabulary, summary_writer(
+            (candidate_dir / "SPEC.md").read_text(encoding="utf-8"), m))
         (dest / "entry.yaml").write_text(
             yaml.safe_dump(entry, sort_keys=True), encoding="utf-8")
 
@@ -364,8 +582,13 @@ def promote(
             "model_profile": m.model_profile,
             "tier": "quarantined",
             "granted_by": run_id,
+            # The eval digest is the traces/<sha256>/ directory the evidence
+            # was just stored under, so the record points at the artifact
+            # rather than asserting the gate passed.
             "evidence": f"certify steps green; harness={m.harness}; "
-                        f"catalog_ref={m.catalog_ref}",
+                        f"catalog_ref={m.catalog_ref}; "
+                        f"eval={eval_digest} "
+                        f"({len(evidence.get('criteria', []))} criteria)",
         })
         trust_file.write_text(yaml.safe_dump(trust, sort_keys=True), encoding="utf-8")
 

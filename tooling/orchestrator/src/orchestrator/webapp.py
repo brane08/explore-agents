@@ -29,14 +29,18 @@ from certify.playbook import HarnessInputs
 from certify.steps import (
     promote as certify_promote,
     select_evalmatrix_rows,
+    step_eval,
     step_layout_manifest,
     step_rebase,
     step_security_static,
+    step_status,
     step_structural,
 )
 
 from orchestrator import assembly as assembly_mod
 from orchestrator.config import Settings, settings_from_env
+from orchestrator.criteria import CriteriaError
+from orchestrator.dispatch import dispatch_b2b, select_harness
 from orchestrator.errors import CODES, StructuredError
 from orchestrator.executor import ToolInvoker, run_invocation
 from orchestrator.lockload import current_ref, entry_by_id, load_lock_at
@@ -283,7 +287,11 @@ def create_app(
                 "result_ref": f"{result.error.code} {result.error.context}".strip(),
             })
             store.set_invocation(invocation.invocation_id, status="error")
-            response = HTMLResponse(render_error(result.error))
+            response = HTMLResponse(
+                render_error(result.error)
+                + (_generate_form(task)
+                   if result.error.code == "PATTERN_UNRECOGNIZED"
+                   and is_operator(request) else ""))
         else:
             if result.outcome == "invoke-agent":
                 agent_entry = result.agent_entry
@@ -299,6 +307,73 @@ def create_app(
                 _execute, invocation.invocation_id, session, task,
                 agent_entry, tools, register_after)
             response = page("task_started.html.j2", invocation=invocation)
+        if created:
+            attach_cookie(response, session)
+        return response
+
+    # -- B2b generation (operator-triggered, ROADMAP §3) -------------------------
+
+    def _generate_form(task: str) -> str:
+        return jinja.get_template("generate_offer.html.j2").render(task=task)
+
+    def _impl_profile() -> dict | None:
+        """The resolved model profile as catalog data, for the independence check.
+
+        The lock carries routing fields only, so `provider` / `profile_class`
+        come from the profile entry itself. Missing profile ⇒ None: the check
+        then records "implementation family unknown" instead of asserting a
+        diversity it could not verify.
+        """
+        entry = (settings.catalog_root / "models" / settings.model_profile
+                 / "entry.yaml")
+        if not entry.is_file():
+            return None
+        return _yaml.safe_load(entry.read_text(encoding="utf-8")) or None
+
+    @app.post("/generate", response_class=HTMLResponse)
+    def request_generation(request: Request, task: str = Form(...)):
+        """Dispatch B2b for a task the cascade could not cover.
+
+        The cascade is re-run first and generation is refused unless it still
+        reports PATTERN_UNRECOGNIZED. Without that, a hand-posted form would be
+        a way around the one control that stops the catalog from growing a
+        second copy of a capability it already has — and the residual recorded
+        as B2 backlog would no longer match what was actually generated.
+        """
+        require_operator(request)
+        session, created = get_session(request)
+        lock = _pinned_lock(session)
+
+        result = route(task, lock, settings.catalog_root, session.user_sub,
+                       scorer, settings, store, operator=True)
+        if not (result.outcome == "error"
+                and result.error.code == "PATTERN_UNRECOGNIZED"):
+            raise HTTPException(
+                status_code=409,
+                detail="the cascade covers this task — generation is for "
+                       "PATTERN_UNRECOGNIZED residuals only",
+            )
+
+        try:
+            dispatched = dispatch_b2b(
+                task, settings.catalog_root, lock, settings,
+                settings.harness_id, select_harness(),
+                catalog_ref=session.catalog_ref,
+                impl_profile=_impl_profile(),
+            )
+        except CriteriaError as exc:
+            # Criteria that nobody authored produce evidence that means nothing;
+            # no candidate is better than an uncertifiable one.
+            raise HTTPException(status_code=409,
+                                detail=f"criteria could not be authored: {exc}")
+
+        if dispatched.outcome != "candidate":
+            raise HTTPException(status_code=409, detail=dispatched.refusal)
+
+        logger.info("b2b dispatched session_id=%s candidate=%s",
+                    session.session_id, dispatched.candidate_dir.name)
+        response = RedirectResponse(f"/certify/{dispatched.candidate_dir.name}",
+                                    status_code=303)
         if created:
             attach_cookie(response, session)
         return response
@@ -442,6 +517,24 @@ def create_app(
     def _current_lock() -> dict:
         return load_lock_at(settings.catalog_root, current_ref(settings.catalog_root))
 
+    def _mechanical_steps(candidate, inputs: HarnessInputs, lock: dict):
+        """Steps 1-3, 5, 6 — the model-independent half of certify.
+
+        The queue screen and the promote action run this one function, so what
+        an operator approves is what was actually checked. Step 3 goes last and
+        is handed the security result: it executes candidate code, and its own
+        guard refuses to run behind a failed scan.
+        """
+        security = step_security_static(candidate, inputs)
+        return [
+            step_layout_manifest(candidate, inputs, settings.catalog_root),
+            step_status(candidate),
+            step_rebase(candidate, lock),
+            step_structural(candidate, inputs),
+            security,
+            step_eval(candidate, security=security),
+        ]
+
     def _stub_summary_writer(spec_text: str, manifest) -> str:
         # Deterministic regeneration from SPEC (draft is advisory, never copied).
         # The certify-model writer rides this seam when creds exist.
@@ -487,12 +580,7 @@ def create_app(
         steps, audit, matrix = [], [], ([], [])
         if candidate.ok and inputs is not None:
             lock = _current_lock()
-            steps = [
-                step_layout_manifest(candidate, inputs, settings.catalog_root),
-                step_rebase(candidate, lock),
-                step_structural(candidate, inputs),
-                step_security_static(candidate, inputs),
-            ]
+            steps = _mechanical_steps(candidate, inputs, lock)
             matrix = select_evalmatrix_rows(candidate, inputs.nearest_templates, lock)
             by_id = {e["id"]: e for e in lock.get("entries", [])}
             audit = [{"id": b.id, "version": b.version,
@@ -511,6 +599,23 @@ def create_app(
                                _=Depends(require_operator)):
         cdir = _candidate_or_404(cid)
         sidecar = _proposed_root / f"{cid}.inputs.yaml"
+
+        # Re-run the mechanical steps against the tree as it is now, not as the
+        # detail screen found it: an operator's approval may be minutes old and
+        # the lock may have moved under it. This also produces the eval evidence
+        # promote() then verifies independently.
+        candidate = load_candidate(cdir)
+        inputs = _load_frozen_inputs(cid)
+        if not candidate.ok or inputs is None:
+            raise HTTPException(status_code=409,
+                                detail="; ".join(candidate.load_errors)
+                                or "frozen §0 inputs missing — cannot re-verify")
+        failed = [s for s in _mechanical_steps(candidate, inputs, _current_lock())
+                  if not s.passed]
+        if failed:
+            raise HTTPException(
+                status_code=409,
+                detail="; ".join(f"{s.step}: {s.detail}" for s in failed))
 
         def commit_promotion(paths, message: str) -> None:
             # the sidecar retires in the same atomic commit; only reached

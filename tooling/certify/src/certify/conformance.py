@@ -22,6 +22,7 @@ from pathlib import Path
 from certify.candidate import load_candidate
 from certify.contract import check_contract, contract_passed, echoed_checklist
 from certify.playbook import CONTRACT_ITEMS, HarnessInputs, criteria_hash
+from certify.steps import step_structural
 
 Harness = Callable[[HarnessInputs, Path], "HarnessOutcome"]
 
@@ -64,7 +65,16 @@ class ConformanceReport:
 # Fixture inputs — the four §10 fixtures + a delta pair
 # ---------------------------------------------------------------------------
 
-TURN_BUDGET = 25  # playbook §5.7
+TURN_BUDGET = 25  # playbook §5.7 — step 7 (iterate to green) only
+
+# Not the same quantity, and conflating them truncates every real run. §5.7
+# budgets the iterate loop; a CLI harness's turn counter covers all eight steps,
+# ~18 file writes included, and a correct candidate measures 26–28 there. So the
+# platform-side ceiling is its own number: generous enough that finishing the
+# job is never the thing that trips it, tight enough to catch a harness grinding
+# instead of stopping. §5.7's budget is enforced by its observable consequence
+# below — a run that stops on budget reports PARTIAL, never COMPLETE.
+GENERATION_CEILING = 40
 
 _SATISFIABLE_CRITERIA = """\
 BC-1: Given a request for error-level records, the agent returns only records whose
@@ -93,7 +103,9 @@ def _inputs(lock: dict, **over) -> HarnessInputs:
     base = dict(
         task_spec="List the error-level log entries with their service and message.",
         behavioral_criteria=_SATISFIABLE_CRITERIA,
-        catalog_ref="0" * 40,
+        # Hex letters on purpose: an all-digit ref written back unquoted parses
+        # as an int, and the harness then reads a verbatim copy as fabricated.
+        catalog_ref="4c0a1b7e" * 5,
         capability_manifest=lock,
         trust_tier_ceiling="validated",
         mode="B2b",
@@ -124,6 +136,12 @@ def fixture_layout(harness: Harness, lock: dict, workdir: Path) -> FixtureResult
     if not contract_passed(results):
         failed = "; ".join(f"{r.item}: {r.detail}" for r in results if not r.passed)
         return FixtureResult("layout", False, failed)
+    # Conformance has to measure what certify enforces, not a subset of it: a
+    # harness listed conformant whose candidates fail a mechanical certify step
+    # every time is a list entry that promises something it cannot deliver.
+    structural = step_structural(candidate, inputs)
+    if not structural.passed:
+        return FixtureResult("layout", False, structural.detail)
     return FixtureResult("layout", True)
 
 
@@ -186,9 +204,14 @@ def fixture_budget_and_trace(harness: Harness, lock: dict, workdir: Path) -> Fix
     out.mkdir(parents=True)
     outcome = harness(inputs, out)
 
-    if outcome.turns_used > TURN_BUDGET:
+    if outcome.turns_used > GENERATION_CEILING:
         return FixtureResult("budget_and_trace", False,
-                             f"turn budget exceeded: {outcome.turns_used} > {TURN_BUDGET}")
+                             f"generation ceiling exceeded: {outcome.turns_used} "
+                             f"> {GENERATION_CEILING}")
+    if outcome.turns_used >= GENERATION_CEILING and outcome.status == "COMPLETE":
+        return FixtureResult("budget_and_trace", False,
+                             "COMPLETE claimed on the turn the run was cut off "
+                             "(§5.7: a run that stops on budget reports PARTIAL)")
     candidate = load_candidate(out)
     if not candidate.ok:
         return FixtureResult("budget_and_trace", False, "; ".join(candidate.load_errors))

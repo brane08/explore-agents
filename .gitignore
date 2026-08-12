@@ -7,3 +7,6 @@ __pycache__/
 .idea/
 .superpowers/sdd/
 log-agent-lab/generated/
+
+# local orchestrator session store (ORCH_DB_PATH default)
+orchestrator.sqlite3*

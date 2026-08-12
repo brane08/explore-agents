@@ -1,0 +1,7 @@
+capability: 'capability needed: batch, before, card, emails, identifiable, information,
+  ips, leave'
+model_profile: stub-class-ref
+prompt_version: 1
+tools:
+- id: es_search
+  version: 1.0.0

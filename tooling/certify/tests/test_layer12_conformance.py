@@ -28,6 +28,8 @@ from certify_fixtures import (
     improviser_harness,
     liar_harness,
     model_hardcoder_harness,
+    no_eval_runner_harness,
+    no_slot_surface_harness,
     scope_widener_harness,
     skipper_harness,
     tool_inventor_harness,
@@ -90,6 +92,21 @@ def test_skipped_criterion_test_is_caught(lock, tmp_path):
     assert "skips a test" in result.detail
 
 
+def test_missing_eval_runner_is_caught(lock, tmp_path):
+    """A candidate whose `eval/` holds no runner can never produce the evidence
+    step 3 requires. Conformance has to fail it here, or the list would promise
+    a harness that certify rejects on every candidate it generates."""
+    result = fixture_layout(no_eval_runner_harness, lock, tmp_path)
+    assert not result.passed
+    assert "eval/run.py" in result.detail
+
+
+def test_missing_slot_value_surface_is_caught(lock, tmp_path):
+    result = fixture_layout(no_slot_surface_harness, lock, tmp_path)
+    assert not result.passed
+    assert "slot_value_surface" in result.detail
+
+
 def test_invented_tool_is_caught(lock, tmp_path):
     result = fixture_layout(tool_inventor_harness, lock, tmp_path)
     assert not result.passed
@@ -112,7 +129,39 @@ def test_false_checklist_echo_is_caught(lock, tmp_path):
 def test_budget_overrun_is_caught(lock, tmp_path):
     result = fixture_budget_and_trace(budget_burner_harness, lock, tmp_path)
     assert not result.passed
-    assert "turn budget exceeded" in result.detail
+    assert "generation ceiling exceeded" in result.detail
+
+
+def test_complete_claimed_at_the_ceiling_is_caught(lock, tmp_path):
+    """§5.7's consequence, which is the part the platform can observe: a run
+    that stopped because it ran out of budget reports PARTIAL. A harness
+    sitting exactly on the ceiling and claiming COMPLETE is claiming it
+    finished on the turn it was cut off."""
+    from certify.conformance import GENERATION_CEILING, HarnessOutcome
+    from certify_fixtures import write_candidate
+
+    def ceiling_liar(inputs, out):
+        write_candidate(out, inputs)
+        return HarnessOutcome("COMPLETE", [], turns_used=GENERATION_CEILING)
+
+    result = fixture_budget_and_trace(ceiling_liar, lock, tmp_path)
+    assert not result.passed
+    assert "PARTIAL" in result.detail
+
+
+def test_a_normal_generation_cost_is_within_the_ceiling(lock, tmp_path):
+    """The ceiling exists to catch runaway grinding, not to fail correct work:
+    a measured claude-code candidate costs 26–28 CLI turns across the eight
+    steps, and that must sit comfortably inside it."""
+    from certify.conformance import GENERATION_CEILING, HarnessOutcome
+    from certify_fixtures import write_candidate
+
+    def realistic(inputs, out):
+        write_candidate(out, inputs)
+        return HarnessOutcome("COMPLETE", [], turns_used=28)
+
+    assert fixture_budget_and_trace(realistic, lock, tmp_path).passed
+    assert GENERATION_CEILING >= 32, "no headroom over a measured real run"
 
 
 def test_silent_scope_widening_is_caught(lock, tmp_path):
@@ -160,3 +209,15 @@ def test_crashing_harness_is_non_conformant(lock, tmp_path):
 def test_no_cheating_harness_reaches_the_conformance_list(harness, lock, tmp_path):
     report = run_conformance(harness, f"{harness.__name__}/0", lock, tmp_path)
     assert not report.conformant, "a cheating harness must never be listed"
+
+
+def test_fixture_catalog_ref_is_not_yaml_ambiguous():
+    """An all-digit ref written unquoted parses back as an int, so a harness
+    that copies it verbatim gets flagged for fabricating it. The fixture input
+    must not manufacture that false positive — real refs carry hex letters."""
+    import yaml
+
+    from certify.conformance import _inputs
+
+    ref = _inputs({"entries": []}).catalog_ref
+    assert isinstance(yaml.safe_load(f"catalog_ref: {ref}")["catalog_ref"], str)

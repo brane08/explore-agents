@@ -1,0 +1,19 @@
+capability_tags:
+- cron-scheduling
+- read-only
+- time-computation
+detail: 'B2b full-agent candidate. Pure deterministic computation over the two request
+  parameters; no tool bindings, no network, no persistence. Parses standard cron (lists,
+  ranges, steps, named months/weekdays, @macros; day-of-month OR day-of-week when
+  both are restricted) and enumerates matching minutes in UTC over a bounded 40-year
+  horizon. Prompt assets: prompts/default.md, prompts/stub-class-ref.md.'
+id: cron-next-fire-times
+kind: agent
+model_requirements:
+  deterministic_stub_compatible: true
+  profile: stub-class-ref
+  structured_output: true
+  tool_use: false
+routing_summary: Given a cron expression and a start timestamp, the agent returns
+  the next five fire
+version: 0.1.0

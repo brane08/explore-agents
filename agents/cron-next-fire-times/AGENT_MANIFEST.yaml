@@ -1,0 +1,37 @@
+agent_id: cron-next-fire-times
+kind: agent
+mode: B2b
+scope: full-agent
+playbook_version: 3-beta
+harness: claude-code/2.1.228
+model_profile: stub-class-ref
+target_runtime: langgraph-py311
+catalog_ref: 4a7408de3a6aa3262da2ffb51129ed63f52ad4e1
+bindings: []
+delegation_requirements: []
+trust_tier_consumed: none
+slot_value_surface:
+- name: fire_time_count
+  type: value
+  location: src/config.py:AgentConfig.fire_time_count
+- name: output_timezone
+  type: value
+  location: src/config.py:AgentConfig.output_timezone
+- name: timestamp_format
+  type: enum
+  location: src/config.py:AgentConfig.timestamp_format
+- name: prompt_path
+  type: value
+  location: src/config.py:AgentConfig.prompt_path
+- name: max_node_iterations
+  type: value
+  location: src/config.py:AgentConfig.max_node_iterations
+- name: bindings
+  type: binding
+  location: src/config.py:AgentConfig.bindings
+- name: search_horizon_days
+  type: value
+  location: src/cron.py:MAX_SEARCH_DAYS
+status: COMPLETE
+behavioral_criteria_ref: f62c7ef651ef38b35f5dd2caa2536ee7f621d8fa12408863a70a29a882297804
+interface_criteria_ref: 0c476541d32c47574aeb3326219da3b46afb32029f3b2a5f0e3ae8df62391ae8

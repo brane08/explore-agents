@@ -19,6 +19,11 @@ MANIFEST_NAME = "AGENT_MANIFEST.yaml"
 REQUIRED_FILES = (MANIFEST_NAME, "entry.draft.yaml", "SPEC.md", "REPORT.md")
 REQUIRED_DIRS_B2B = ("src", "prompts", "tests", "eval", "trace")
 REQUIRED_DIRS_B2A = ("scaffold", "eval")
+# §6 says `eval/` holds "the eval runner" without naming its entry point. The
+# platform has to pin one to execute it (step 3), so it is pinned here — the
+# single place the runner path is defined, for the gate, the conformance
+# fixtures, and the contract Role A is handed alike.
+EVAL_RUNNER_REL = "eval/run.py"
 ALLOWED_TOP_LEVEL = set(REQUIRED_FILES) | set(REQUIRED_DIRS_B2B) | set(REQUIRED_DIRS_B2A)
 
 STATUSES = ("COMPLETE", "PARTIAL", "ERROR")

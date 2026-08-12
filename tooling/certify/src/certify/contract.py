@@ -16,6 +16,8 @@ from certify.candidate import Candidate
 from certify.playbook import (
     ALLOWED_TOP_LEVEL,
     CONTRACT_ITEMS,
+    EVAL_RUNNER_REL,
+    MANIFEST_NAME,
     REQUIRED_DIRS_B2A,
     REQUIRED_DIRS_B2B,
     REQUIRED_FILES,
@@ -31,6 +33,13 @@ _MODEL_ID_RE = re.compile(
     r"llama-?[0-9][a-z0-9.\-]*|mistral-[a-z0-9.\-]+)\b",
     re.IGNORECASE,
 )
+# §6 requires the manifest to record the harness that generated the candidate,
+# and every real Role A harness id carries a model family name in it. Scanning
+# that one value as a hardcoded model id fails every candidate a real harness
+# can produce — §3.5 is about the *agent* pinning a model instead of resolving
+# `model_profile`, which is exactly what this provenance field is not. Only the
+# value is masked, so a model id anywhere else in the manifest still fails.
+_HARNESS_LINE_RE = re.compile(r"^harness:.*$", re.MULTILINE)
 _SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----)"
@@ -131,6 +140,24 @@ def check_no_agent_invocation(candidate: Candidate, inputs: HarnessInputs) -> Co
     return ContractResult(item, desc, True)
 
 
+# §3.5 forbids the agent *pinning a model* instead of resolving `model_profile`,
+# so the rule applies to what actually runs or is sent to a model: src/,
+# prompts/, eval/, and the two declarations that configure them. The rest of the
+# §6 layout is documentation and provenance — REPORT.md quotes the profile it
+# ran against, trace/ logs the harness that produced the candidate, and tests/
+# can only assert §3.5 by naming the identifiers it forbids. Scanning those for
+# model ids fails correct candidates for recording and checking the very thing
+# the rule is about. Secrets are scanned everywhere regardless.
+_RUNTIME_SURFACE_DIRS = ("src", "prompts", "eval", "scaffold")
+_RUNTIME_SURFACE_FILES = (MANIFEST_NAME, "entry.draft.yaml")
+
+
+def _on_runtime_surface(rel: Path) -> bool:
+    if len(rel.parts) == 1:
+        return rel.name in _RUNTIME_SURFACE_FILES
+    return rel.parts[0] in _RUNTIME_SURFACE_DIRS
+
+
 def check_no_ui_no_model_ids_no_secrets(candidate: Candidate,
                                         inputs: HarnessInputs) -> ContractResult:
     item, desc = CONTRACT_ITEMS[3]
@@ -142,11 +169,14 @@ def check_no_ui_no_model_ids_no_secrets(candidate: Candidate,
         if p.name == "REPORT.md":
             continue  # the report may quote the profile it ran against
         text = _read(p)
-        hit = _MODEL_ID_RE.search(text)
-        if hit:
-            return ContractResult(item, desc, False,
-                                  f"hardcoded model id '{hit.group(0)}' in "
-                                  f"{p.relative_to(candidate.path)}")
+        rel = p.relative_to(candidate.path)
+        if p.name == MANIFEST_NAME:
+            text = _HARNESS_LINE_RE.sub("harness:", text)
+        if _on_runtime_surface(rel):
+            hit = _MODEL_ID_RE.search(text)
+            if hit:
+                return ContractResult(item, desc, False,
+                                      f"hardcoded model id '{hit.group(0)}' in {rel}")
         secret = _SECRET_RE.search(text)
         if secret:
             return ContractResult(item, desc, False,
@@ -163,6 +193,13 @@ def check_layout(candidate: Candidate, inputs: HarnessInputs) -> ContractResult:
     for name in required_dirs:
         if not (candidate.path / name).is_dir():
             return ContractResult(item, desc, False, f"missing {name}/ (mode {inputs.mode})")
+    # An `eval/` that certify cannot execute is not the §6 `eval/`: step 3
+    # produces the evidence a profile migration reruns, and without the runner
+    # there is nothing to rerun.
+    if not (candidate.path / EVAL_RUNNER_REL).is_file():
+        return ContractResult(item, desc, False,
+                              f"missing {EVAL_RUNNER_REL} — eval/ must hold the "
+                              "runner certify executes")
     for child in candidate.path.iterdir():
         if child.name not in ALLOWED_TOP_LEVEL:
             return ContractResult(item, desc, False,
