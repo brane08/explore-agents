@@ -69,6 +69,25 @@ def test_hash_cannot_forge_file_boundaries(tmp_path):
     assert entry_hash(one, "skill") != entry_hash(two, "skill")
 
 
+def test_build_artifacts_do_not_enter_the_hash(tmp_path):
+    """Certify step 3 executes the candidate's tests, which leaves `__pycache__`
+    beside the sources. Those bytes vary with interpreter, pytest version and
+    whether the suite ever ran, so hashing them makes the entry hash depend on
+    the build machine: a lock built after an eval run never matches a clean CI
+    checkout of the same commit."""
+    entry_dir = tmp_path / "agent"
+    (entry_dir / "src").mkdir(parents=True)
+    w(entry_dir / "AGENT_MANIFEST.yaml", "agent_id: a")
+    w(entry_dir / "src" / "agent.py", "x = 1")
+    clean = entry_hash(entry_dir, "agent")
+
+    cache = entry_dir / "src" / "__pycache__"
+    cache.mkdir()
+    (cache / "agent.cpython-314.pyc").write_bytes(b"\x00compiled")
+
+    assert entry_hash(entry_dir, "agent") == clean
+
+
 def test_refresh_refused_on_detached_head(catalog):
     import subprocess
 
