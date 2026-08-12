@@ -783,3 +783,57 @@ def test_promotion_still_refuses_an_unflagged_unapproved_tag(promo_root):
     result, _ = _promote(promo_root)
     assert not result.passed
     assert "cron-scheduling" in result.detail
+
+
+def test_promoted_entry_validates_against_the_catalog_schema(promo_root):
+    """The draft is advisory (CATALOG §8.7) and certify *generates* the entry.
+    Copying the draft wholesale carried fields the schema forbids — a real
+    draft declares `trust_tier: proposed` and `assembly: b2`, and flags its
+    tags — so lockbuild rejected the entry and promotion rolled back. The
+    generated entry has to satisfy the schema lockbuild will parse."""
+    import yaml as _yaml
+    from lockbuild.schemas import AgentEntry
+
+    _set_draft_tags(promo_root, [
+        {"name": "log-source", "proposed": False},
+        {"name": "log-analysis", "proposed": True},
+    ])
+    draft_file = (promo_root / "agents" / "_proposed" / "log-error-lister"
+                  / "entry.draft.yaml")
+    draft = _yaml.safe_load(draft_file.read_text(encoding="utf-8"))
+    draft["trust_tier"] = "proposed"      # orchestrator-owned, never in an entry
+    draft["assembly"] = "b2"              # schema allows b1 (config-only) or none
+    draft["inputs"] = {"q": "string"}     # draft-only prose, not an entry field
+    draft_file.write_text(_yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+    result, _ = _promote(promo_root)
+    assert result.passed, result.detail
+
+    entry = _yaml.safe_load(
+        (promo_root / "agents" / "log-error-lister" / "entry.yaml").read_text(
+            encoding="utf-8"))
+    AgentEntry.model_validate(entry)                     # the coupling that broke
+    assert "trust_tier" not in entry, "trust is orchestrator-owned"
+    assert "assembly" not in entry
+    assert "inputs" not in entry
+    assert entry["capability_tags"] == ["log-analysis", "log-source"], (
+        "every tag is approved by this point, so none stays flagged")
+
+
+def test_promoted_entry_takes_bindings_from_the_manifest(promo_root):
+    """Bindings in the entry are the audited ones. The draft is Role A's
+    advisory copy; the manifest is what step 5 checked against the ceiling."""
+    import yaml as _yaml
+
+    draft_file = (promo_root / "agents" / "_proposed" / "log-error-lister"
+                  / "entry.draft.yaml")
+    draft = _yaml.safe_load(draft_file.read_text(encoding="utf-8"))
+    draft["bindings"] = [{"id": "field_stats", "version": "9.9.9"}]  # quarantined
+    draft_file.write_text(_yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+    result, _ = _promote(promo_root)
+    assert result.passed, result.detail
+    entry = _yaml.safe_load(
+        (promo_root / "agents" / "log-error-lister" / "entry.yaml").read_text(
+            encoding="utf-8"))
+    assert [b["id"] for b in entry.get("bindings", [])] == ["es_search"]

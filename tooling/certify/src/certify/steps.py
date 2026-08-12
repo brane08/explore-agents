@@ -393,12 +393,65 @@ def _unapproved_tags(tags, vocabulary: set[str]) -> list[str]:
     the draft is frozen at generation, so a tag flagged `proposed` could never
     be promoted no matter what a human approved afterwards.
     """
-    unapproved: set[str] = set()
+    return sorted({n for n in _tag_names(tags) if n not in vocabulary})
+
+
+def _tag_names(tags) -> list[str]:
+    """Tag names from either shape: bare strings, or the {name, proposed}
+    mappings playbook §6 tells Role A to write for new tags."""
+    names = []
     for tag in tags or []:
         name = str(tag.get("name", "") if isinstance(tag, dict) else tag).strip()
-        if name and name not in vocabulary:
-            unapproved.add(name)
-    return sorted(unapproved)
+        if name:
+            names.append(name)
+    return names
+
+
+def _generate_entry(draft: dict, manifest, vocabulary: set[str],
+                    routing_summary: str) -> dict:
+    """Build `entry.yaml` from the certified artifacts (CATALOG §8.7).
+
+    Generated field by field, never copied from the draft. `entry.draft.yaml`
+    is Role A's *advisory* proposal and carries things a catalog entry must not
+    have: `trust_tier` (orchestrator-owned — CHECKLISTS layer 1 forbids it in
+    an entry), `assembly: b2` (the schema's `assembly` marks b1 config-only
+    registrations), draft-only prose fields, and tags still flagged `proposed`.
+    Copying it wholesale produced an entry the lock's own schema rejects, so
+    promotion built a catalog it could not then load.
+
+    What carries over is what §8.7 names: the regenerated routing_summary, the
+    approved tags, model_requirements, detail. Bindings come from the manifest
+    — those are the ones step 5 audited against the trust ceiling; the draft's
+    copy is unverified.
+    """
+    entry: dict = {
+        "id": manifest.agent_id,
+        "kind": manifest.kind,
+        "version": str(draft.get("version", "1.0.0")),
+        "routing_summary": routing_summary,
+        # Every tag is approved by now, so each is a plain name: `proposed` is
+        # `Literal[True]` in the schema, i.e. only an *unapproved* tag may
+        # carry the flag, and one of those never reaches this point.
+        "capability_tags": sorted(
+            {n for n in _tag_names(draft.get("capability_tags", []))
+             if n in vocabulary}),
+        "detail": str(draft.get("detail", "") or ""),
+    }
+    bindings = [{"id": b.id, "version": b.version} for b in manifest.bindings]
+    if bindings:
+        entry["bindings"] = bindings
+    requirements = dict(draft.get("model_requirements") or {})
+    if manifest.model_profile:
+        requirements.setdefault("profile", manifest.model_profile)
+    if requirements:
+        entry["model_requirements"] = requirements
+    delegation = list(draft.get("delegation_requirements") or [])
+    if delegation:
+        entry["delegation_requirements"] = delegation
+    conforms = draft.get("conforms_to") or {}
+    if conforms and manifest.kind == "component":
+        entry["conforms_to"] = conforms
+    return entry
 
 
 def promote(
@@ -516,12 +569,8 @@ def promote(
                 stored_traces.append(target)
             shutil.rmtree(trace_dir)
 
-        entry = dict(draft)
-        entry["routing_summary"] = summary_writer(
-            (candidate_dir / "SPEC.md").read_text(encoding="utf-8"), m)
-        if m.model_profile:
-            entry.setdefault("model_requirements", {})
-            entry["model_requirements"].setdefault("profile", m.model_profile)
+        entry = _generate_entry(draft, m, vocabulary, summary_writer(
+            (candidate_dir / "SPEC.md").read_text(encoding="utf-8"), m))
         (dest / "entry.yaml").write_text(
             yaml.safe_dump(entry, sort_keys=True), encoding="utf-8")
 
