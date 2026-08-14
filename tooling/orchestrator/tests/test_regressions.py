@@ -185,3 +185,39 @@ def test_a_broken_scorer_refuses_the_task_instead_of_mis_routing(settings, store
     assert r.status_code == 503
     assert not store.error_records(), "no routing decision was made — record none"
     assert store.get_invocation(last_invocation(store, client)).status == "error"
+
+
+SPEC_WRAPPED = """# SPEC — cron-next-fire-times (B2b, full-agent)
+
+## 1. Capability restatement (§5.1)
+
+Given a cron expression and a start timestamp, the agent returns the next five fire
+times of that schedule, expressed in UTC. The start timestamp is normalised to UTC
+(a naive timestamp is read as UTC, an offset-bearing one is converted); fire times
+are strictly after it, ascending.
+
+## 2. Something else
+
+Not part of the summary.
+"""
+
+
+def test_summary_writer_does_not_publish_a_wrapped_fragment():
+    """CATALOG §4 wants 1-2 sentences and the router embeds this text. Reading
+    the first physical line of hard-wrapped SPEC prose cut mid-sentence, so the
+    promoted entry shipped '...returns the next five fire' as routing data."""
+    from orchestrator.webapp import stub_summary_writer
+
+    summary = stub_summary_writer(SPEC_WRAPPED)
+
+    assert summary.startswith("Given a cron expression")
+    assert summary.endswith(".")
+    assert "next five fire times of that schedule" in summary
+    assert "Not part of the summary" not in summary
+    assert 1 <= summary.count(".") <= 3  # 1-2 sentences (abbrev-free prose)
+
+
+def test_summary_writer_falls_back_when_the_spec_has_no_prose():
+    from orchestrator.webapp import stub_summary_writer
+
+    assert stub_summary_writer("# heading only\n\n") == "Certified capability."

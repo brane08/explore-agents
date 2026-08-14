@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
@@ -55,6 +56,34 @@ _TEMPLATES = Path(__file__).parent / "templates"
 _STATIC = Path(__file__).parent / "static"
 
 SESSION_COOKIE = "orch_session"
+
+
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def stub_summary_writer(spec_text: str, manifest=None) -> str:
+    """Deterministic stand-in for the §8.7 certify-model summary writer.
+
+    CATALOG §4 wants 1–2 *sentences*; SPEC.md is hard-wrapped prose, so reading
+    the first physical line cuts mid-sentence and publishes a fragment as the
+    text the router embeds. Unwrap the first paragraph of the capability
+    restatement, then cut on sentence boundaries. The certify-model writer rides
+    this same seam when credentials exist.
+    """
+    paragraph: list[str] = []
+    for raw in spec_text.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            continue
+        if not line:
+            if paragraph:
+                break
+            continue
+        paragraph.append(line)
+    if not paragraph:
+        return "Certified capability."
+    sentences = _SENTENCE_END_RE.split(" ".join(paragraph))
+    return " ".join(s for s in sentences[:2] if s).strip()
 
 
 def _no_tool_backend(tool_id: str, args: dict) -> dict:
@@ -535,13 +564,6 @@ def create_app(
             step_eval(candidate, security=security),
         ]
 
-    def _stub_summary_writer(spec_text: str, manifest) -> str:
-        # Deterministic regeneration from SPEC (draft is advisory, never copied).
-        # The certify-model writer rides this seam when creds exist.
-        lines = [ln.strip() for ln in spec_text.splitlines()
-                 if ln.strip() and not ln.startswith("#")]
-        return lines[0] if lines else "Certified capability."
-
     def _run_lockbuild(root: Path) -> None:
         from lockbuild.build import LOCK_FILENAME, build_lock, render_lock
         (root / LOCK_FILENAME).write_text(render_lock(build_lock(root)),
@@ -627,7 +649,7 @@ def create_app(
         result = certify_promote(
             catalog_root=settings.catalog_root,
             candidate_dir=cdir,
-            summary_writer=_stub_summary_writer,
+            summary_writer=stub_summary_writer,
             run_lockbuild=_run_lockbuild,
             commit=commit_promotion,
         )
