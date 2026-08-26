@@ -43,3 +43,21 @@ This file configures Role B only. Role A (B2 candidate generation) runs in a sep
 scratch workspace with the playbook injected per invocation and write access restricted
 to the candidate directory — it never uses this CLAUDE.md, this repo checkout, or this
 permission profile. See `docs/ROADMAP.md` §0.
+
+## Agent summaries
+There is no memory across sessions beyond git — a fresh session only has this file, the
+git log, and `design/`. Keep both current, in `design/` (never `docs/`):
+
+- **Repo brief** (`design/repo-brief.md`) — what the platform does, for a reader who
+  hasn't seen the specs. Update only when the architecture actually changes; don't
+  rewrite it every session.
+- **Checkpoint** (`design/checkpoint.md`) — what's built and merged, what's designed but
+  unbuilt, what's deferred, what's open. One file, overwritten in place — edit it, don't
+  create a new dated copy. Update it whenever a phase closes, a design is approved, or
+  something gets deferred, and always when the user asks for a checkpoint.
+
+Both are plain status/orientation records, not specs — write them like the rest of
+`design/`: design records the human hasn't necessarily reviewed line-by-line, exempt from
+the `docs/` human-only rule. A summary that contradicts the actual git history is worse
+than no summary; verify state (`git log`, `git status`, the relevant lock/trust files)
+before writing one rather than reconstructing it from memory.
