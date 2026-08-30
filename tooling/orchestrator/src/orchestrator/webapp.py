@@ -48,6 +48,7 @@ from orchestrator.lockload import current_ref, entry_by_id, load_lock_at
 from orchestrator.router import allowed_tiers, route
 from orchestrator.scoring import Scorer, ScorerError, select_scorer
 from orchestrator.store import SQLiteStore, Store
+from orchestrator.supervise import open_canary, run_shadow, select_mode
 from orchestrator.trustcheck import load_records, transitive_tier
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,107 @@ def create_app(
                 detail="pinned catalog ref is no longer resolvable — start a new session",
             )
 
+    def _counterpart_for(task_text: str, lock: dict, entry: dict, session) -> dict | None:
+        """The entry the cascade would have routed to if this agent did not
+        exist — the comparison the caller would otherwise have received."""
+        records = load_records(settings.catalog_root)
+        pruned = dict(lock, entries=[
+            e for e in lock.get("entries", [])
+            if e["id"] != entry["id"]
+            and transitive_tier(records, e, lock, settings.model_profile) == "validated"
+        ])
+        result = route(task_text, pruned, settings.catalog_root, session.user_sub,
+                       scorer, settings, store, operator=False)
+        return result.agent_entry if result.outcome == "invoke-agent" else None
+
+    def _run_agent_now(inv_id: str, session, task_text: str, agent_entry: dict,
+                       lock: dict, *, supervised: bool) -> tuple[bool, str]:
+        """Foreground run of `agent_entry` on invocation `inv_id`; emits the
+        `invocation`/`node`/`tool_call` trace plus the terminal event, and
+        returns (ok, result_ref) the way `_execute` would once it completes.
+
+        Used both for a shadow mode's counterpart (supervised=False — a
+        normal validated run) and for the quarantined agent's own run in
+        either mode (supervised=True). Must never raise, same invariant as
+        `_execute`: every exit path emits a terminal event."""
+        tools = _resolve_bindings(lock, agent_entry)
+        try:
+            if tools is None:
+                ok, result_ref = False, (
+                    f"{agent_entry['id']} has bindings missing at the pinned ref")
+            else:
+                ok, result_ref = run_invocation(
+                    store, inv_id,
+                    agent_id=agent_entry["id"], agent_version=agent_entry["version"],
+                    model_profile=settings.model_profile,
+                    catalog_ref=session.catalog_ref,
+                    task_text=task_text, tools=tools,
+                    invoke_tool=invoke_tool, scorer=scorer, supervised=supervised,
+                )
+        except Exception as exc:
+            ok, result_ref = False, f"{type(exc).__name__}: {exc}"
+        store.append_event(inv_id, "terminal", {
+            "status": "COMPLETE" if ok else "ERROR", "result_ref": result_ref,
+        })
+        store.set_invocation(inv_id, status="complete" if ok else "error")
+        return ok, result_ref
+
+    def _dispatch_supervised(plan, entry: dict, invocation, session, task_text: str,
+                             background: BackgroundTasks, created: bool) -> HTMLResponse:
+        """`plan.mode` is "shadow" or "canary" — "refuse" is handled by the
+        caller before this is ever reached.
+
+        Shadow: the counterpart runs in the foreground and its result is the
+        HTTP response; the quarantined agent's own run happens in a
+        background task so it can never block or leak into that response,
+        and its (real) output feeds `run_shadow` once it completes.
+
+        Canary: the quarantined agent serves the request itself — same
+        async dispatch pattern as an ordinary invoke — and a `pending` row
+        is opened for a human to adjudicate once it completes."""
+        lock = _pinned_lock(session)
+
+        if plan.mode == "shadow":
+            counterpart = plan.counterpart
+            cp_invocation = store.create_invocation(session.session_id, counterpart["id"])
+            cp_ok, cp_ref = _run_agent_now(
+                cp_invocation.invocation_id, session, task_text, counterpart, lock,
+                supervised=False)
+
+            def _shadow_task() -> None:
+                ok, result_ref = _run_agent_now(
+                    invocation.invocation_id, session, task_text, entry, lock,
+                    supervised=True)
+                run_shadow(
+                    store, entry=entry, model_profile=settings.model_profile,
+                    invocation_id=invocation.invocation_id,
+                    counterpart_id=counterpart["id"],
+                    counterpart_output={"result_ref": cp_ref} if cp_ok else None,
+                    shadow_output={"result_ref": result_ref} if ok else None,
+                    error=None if ok else result_ref,
+                    predicates={},
+                )
+
+            background.add_task(_shadow_task)
+            response = page(
+                "invocation.html.j2",
+                invocation=store.get_invocation(cp_invocation.invocation_id),
+                events=store.events_after(cp_invocation.invocation_id, 0),
+            )
+        else:  # canary
+            def _canary_task() -> None:
+                _run_agent_now(invocation.invocation_id, session, task_text, entry, lock,
+                               supervised=True)
+                open_canary(store, entry=entry, model_profile=settings.model_profile,
+                           invocation_id=invocation.invocation_id)
+
+            background.add_task(_canary_task)
+            response = page("task_started.html.j2", invocation=invocation)
+
+        if created:
+            attach_cookie(response, session)
+        return response
+
     @app.post("/tasks", response_class=HTMLResponse)
     def submit_task(request: Request, background: BackgroundTasks,
                     task: str = Form(...)):
@@ -488,6 +590,22 @@ def create_app(
         # tier + user authz checked here, live (recall pierces the pin)
         records = load_records(settings.catalog_root)
         tier = transitive_tier(records, entry, lock, settings.model_profile)
+        if tier == "quarantined":
+            # layer 8: quarantined agents run only in supervised mode — this
+            # replaces both the non-operator refusal below and (today's bug)
+            # an operator's unsupervised pass-through, since allowed_tiers()
+            # grants operators every tier.
+            invocation = store.create_invocation(session.session_id, agent_id)
+            counterpart = _counterpart_for(task, lock, entry, session)
+            plan = select_mode(entry, counterpart=counterpart,
+                               read_only_bindings=set(settings.read_only_bindings),
+                               canary_opt_in=set(settings.canary_opt_in))
+            if plan.mode == "refuse":
+                return _refuse(invocation, session, created,
+                               f"{agent_id} supervised invocation unavailable: "
+                               f"{plan.reason}")
+            return _dispatch_supervised(plan, entry, invocation, session, task,
+                                        background, created)
         if tier not in allowed_tiers(session.user_sub, settings,
                                      operator=is_operator(request)):
             store.queue_stale(entry["id"], f"tier:{tier}")
@@ -672,5 +790,57 @@ def create_app(
         logger.info("certify reject candidate_id=%s reason=%s", cid, reason)
         return HTMLResponse(
             f"<p class='banner'>rejected {cid}: {reason or 'no reason given'}</p>")
+
+    # -- canary review (meta screen — operator role, UI-PLANE §5) --------------
+
+    def _canary_key(agent_id: str, entry: dict | None, runs: list) -> tuple[str, str]:
+        # Prefer the live lock entry's version; fall back to the most recent
+        # run's recorded version/profile so the screen still renders a key
+        # once the entry has moved on (or isn't resolvable) but evidence exists.
+        if entry is not None:
+            return entry.get("version", ""), settings.model_profile
+        if runs:
+            return runs[0].entry_version, runs[0].model_profile
+        return "", settings.model_profile
+
+    @app.get("/canary/{agent_id}", response_class=HTMLResponse)
+    def canary_review(agent_id: str, request: Request, demoted: bool = False,
+                      _=Depends(require_operator)):
+        runs = store.supervised_runs(agent_id)
+        entry = entry_by_id(_current_lock(), agent_id)
+        streak = store.supervised_streak(agent_id, entry["version"],
+                                         settings.model_profile) if entry else 0
+        key_version, key_model_profile = _canary_key(agent_id, entry, runs)
+        return page("canary.html.j2", agent_id=agent_id, runs=runs, streak=streak,
+                    threshold=settings.supervision_threshold,
+                    eligible=streak >= settings.supervision_threshold,
+                    key_version=key_version, key_model_profile=key_model_profile,
+                    demoted=demoted)
+
+    @app.post("/canary/{agent_id}/adjudicate")
+    def canary_adjudicate(agent_id: str, request: Request, run_id: int = Form(...),
+                          verdict: str = Form(...), _=Depends(require_operator)):
+        if verdict not in {"clean", "incident"}:
+            raise HTTPException(status_code=400, detail="verdict must be clean|incident")
+        store.close_supervised_run(run_id, verdict=verdict,
+                                   adjudicated_by=user_sub(request))
+        return RedirectResponse(f"/canary/{agent_id}", status_code=303)
+
+    @app.post("/canary/{agent_id}/void")
+    def canary_void(agent_id: str, request: Request, run_id: int = Form(...),
+                    reason: str = Form(...), _=Depends(require_operator)):
+        store.close_supervised_run(run_id, verdict="void", reason=reason,
+                                   adjudicated_by=user_sub(request))
+        return RedirectResponse(f"/canary/{agent_id}", status_code=303)
+
+    @app.post("/canary/{agent_id}/demote")
+    def canary_demote(agent_id: str, request: Request, _=Depends(require_operator)):
+        # Recall already routes around a demoted tier via trust.yaml at
+        # invocation time; the orchestrator never writes trust.yaml itself
+        # (CATALOG §8 — lockbuild/certify own it). This only queues the
+        # request so an operator sees it and can run the certify demotion
+        # path, which is the sole writer.
+        store.queue_stale(agent_id, "demotion requested")
+        return RedirectResponse(f"/canary/{agent_id}?demoted=1", status_code=303)
 
     return app

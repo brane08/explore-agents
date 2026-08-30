@@ -30,6 +30,9 @@ class Settings:
     register_commit: bool = True              # commit B1 registrations (epoch-pinned routing needs a SHA)
     harness_id: str = "stub-harness/0"        # conformance-list id dispatched for B2b (§10)
     operator_users: tuple[str, ...] = ()
+    read_only_bindings: frozenset[str] = field(default_factory=frozenset)
+    canary_opt_in: frozenset[str] = field(default_factory=frozenset)
+    supervision_threshold: int = 20
 
     def __post_init__(self) -> None:
         if self.auth_mode not in {"bff", "oidc"}:
@@ -52,6 +55,7 @@ _ENV_FIELDS = {
     "ORCH_COVERAGE_THRESHOLD": ("coverage_threshold", float),
     "ORCH_MODEL_PROFILE": ("model_profile", str),
     "ORCH_HARNESS_ID": ("harness_id", str),
+    "ORCH_SUPERVISION_THRESHOLD": ("supervision_threshold", int),
 }
 
 
@@ -79,6 +83,16 @@ def settings_from_env() -> Settings:
     if operators is not None:
         kwargs["operator_users"] = tuple(
             u.strip() for u in operators.split(",") if u.strip()
+        )
+    read_only = _env("ORCH_READ_ONLY_BINDINGS")
+    if read_only is not None:
+        kwargs["read_only_bindings"] = frozenset(
+            b.strip() for b in read_only.split(",") if b.strip()
+        )
+    canary = _env("ORCH_CANARY_OPT_IN")
+    if canary is not None:
+        kwargs["canary_opt_in"] = frozenset(
+            a.strip() for a in canary.split(",") if a.strip()
         )
     settings = Settings(**kwargs)
     if settings.secret_key == INSECURE_DEFAULT_SECRET_KEY:

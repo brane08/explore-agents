@@ -80,6 +80,23 @@ def client(settings: Settings, store: SQLiteStore) -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture
+def operator_client(settings: Settings, store: SQLiteStore) -> TestClient:
+    """Same wiring as `client`, but requests carry an operator identity.
+
+    Built on the same `settings`/`store` fixture names as `client` so that,
+    in modules that override `store` locally (e.g. test_layer8_supervision's
+    bare KEY-based fixture), this fixture resolves to that same override —
+    it must write into and read from the same store the test asserts on.
+    """
+    app = create_app(settings, store=store, scorer=lexical_scorer,
+                     invoke_tool=fake_invoker)
+    test_client = TestClient(app)
+    test_client.headers.update({"X-Forwarded-User": "op@example.com",
+                                "X-Forwarded-Roles": "operator"})
+    return test_client
+
+
 def add_skill(root: Path, sid: str, summary: str) -> None:
     d = root / "skills" / sid
     (d / "impl").mkdir(parents=True)
@@ -101,6 +118,39 @@ def grant_validated(root: Path, sid: str, profile: str = "stub-class-ref") -> No
     data["records"].append({
         "id": sid, "version": "1.0.0", "model_profile": profile,
         "tier": "validated", "granted_by": "test", "evidence": "test",
+    })
+    trust.write_text(yaml.safe_dump(data, sort_keys=True), encoding="utf-8")
+
+
+def add_agent(root: Path, aid: str, routing_summary: str, *,
+             detail: str | None = None, structured_output: bool = True,
+             bindings: list[dict] | None = None,
+             model_profile: str = "stub-class-ref", version: str = "1.0.0") -> None:
+    import yaml
+    d = root / "agents" / aid
+    d.mkdir(parents=True)
+    entry: dict = {
+        "id": aid, "kind": "agent", "version": version,
+        "routing_summary": routing_summary,
+        "detail": detail if detail is not None else routing_summary,
+        "model_requirements": {"structured_output": structured_output},
+    }
+    if bindings:
+        entry["bindings"] = bindings
+    (d / "entry.yaml").write_text(yaml.safe_dump(entry, sort_keys=True), encoding="utf-8")
+    (d / "AGENT_MANIFEST.yaml").write_text(
+        yaml.safe_dump({"model_profile": model_profile, "bindings": []}, sort_keys=True),
+        encoding="utf-8")
+
+
+def grant_tier(root: Path, sid: str, tier: str, profile: str = "stub-class-ref",
+              version: str = "1.0.0") -> None:
+    import yaml
+    trust = root / "trust.yaml"
+    data = yaml.safe_load(trust.read_text(encoding="utf-8"))
+    data["records"].append({
+        "id": sid, "version": version, "model_profile": profile,
+        "tier": tier, "granted_by": "test", "evidence": "test",
     })
     trust.write_text(yaml.safe_dump(data, sort_keys=True), encoding="utf-8")
 

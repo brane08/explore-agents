@@ -38,8 +38,14 @@ def run_invocation(
     tools: list[dict],
     invoke_tool: ToolInvoker,
     scorer: Scorer,
+    supervised: bool = False,
 ) -> tuple[bool, str]:
     """Execute a (stub-profile) agent run; returns (ok, result summary).
+
+    `supervised` marks a run dispatched under layer 8 supervision (shadow or
+    canary) — it never gates behaviour here, it only makes the run observable
+    in the trace; the caller (webapp's `_dispatch_supervised`) is what
+    actually enforces "quarantined agents run only in supervised mode".
 
     The caller emits the `terminal` event — anything that must appear in the
     trace (e.g. the B1 registration routing event) happens before terminal,
@@ -51,6 +57,7 @@ def run_invocation(
         "version": agent_version,
         "model_profile": model_profile,
         "catalog_ref": catalog_ref,
+        "supervised": supervised,
     })
 
     t0 = time.monotonic()
