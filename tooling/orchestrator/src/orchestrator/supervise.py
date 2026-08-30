@@ -33,9 +33,20 @@ def _structured(entry: dict) -> bool:
 
 def select_mode(entry: dict, *, counterpart: dict | None,
                 read_only_bindings: set[str], canary_opt_in: set[str]) -> SupervisionPlan:
+    # Shadow's background run executes the quarantined agent's real write
+    # bindings just as canary's foreground run does ("takes real actions on a
+    # real request" — design §3.2 applies verbatim to §3.1's background run).
+    # The opt-in gate therefore applies before either mode is offered, not
+    # only before canary.
+    eligible = is_read_only(entry, read_only_bindings) or entry["id"] in canary_opt_in
     if counterpart is not None and _structured(entry):
-        return SupervisionPlan("shadow", counterpart=counterpart)
-    if is_read_only(entry, read_only_bindings) or entry["id"] in canary_opt_in:
+        if eligible:
+            return SupervisionPlan("shadow", counterpart=counterpart)
+        return SupervisionPlan(
+            "refuse",
+            reason="write-capable without canary opt-in — no evidence path",
+        )
+    if eligible:
         return SupervisionPlan("canary")
     missing = "no counterpart" if counterpart is None else "prose output"
     return SupervisionPlan(

@@ -254,6 +254,13 @@ class SQLiteStore:
                              adjudicated_by: str | None = None) -> None:
         if verdict not in {"clean", "incident", "void"}:
             raise ValueError(f"cannot close a run as {verdict!r}")
+        rows = self._query(
+            "SELECT verdict FROM supervised_run WHERE run_id=?", (run_id,))
+        if not rows:
+            raise ValueError(f"no supervised run {run_id!r}")
+        if rows[0][0] != "pending":
+            raise ValueError(
+                f"supervised run {run_id!r} is already {rows[0][0]!r}, not pending")
         self._write(
             "UPDATE supervised_run SET verdict=?, reason=?, adjudicated_by=?,"
             " adjudicated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE run_id=?",

@@ -63,3 +63,61 @@ def test_an_incident_in_the_tail_blocks_promotion(tmp_catalog):
     with pytest.raises(ValueError):
         promote_to_validated(tmp_catalog, **KEY, runs=runs, threshold=20,
                              run_lockbuild=lambda root: None, commit=lambda p, m: None)
+
+
+# Fix 6 — runs must be bound to the (entry_id, version, model_profile) key;
+# evidence gathered on a different version/profile must not cross the key.
+
+def _keyed_runs(n: int, verdict: str = "clean", **key_overrides) -> list[dict]:
+    keyed = dict(entry_id=KEY["entry_id"], entry_version=KEY["version"],
+                model_profile=KEY["model_profile"])
+    keyed.update(key_overrides)
+    return [{"run_id": i, "invocation_id": f"inv{i}", "mode": "shadow",
+             "verdict": verdict, "reason": "", "adjudicated_by": None, **keyed}
+            for i in range(n)]
+
+
+def test_runs_tagged_with_a_different_version_are_excluded_from_the_streak(tmp_catalog):
+    stale = _keyed_runs(20, entry_version="0.0.1")  # not KEY["version"]
+    with pytest.raises(ValueError, match="0 clean runs"):
+        promote_to_validated(tmp_catalog, **KEY, runs=stale, threshold=20,
+                             run_lockbuild=lambda root: None, commit=lambda p, m: None)
+
+
+def test_runs_tagged_with_a_different_profile_are_excluded_from_the_streak(tmp_catalog):
+    stale = _keyed_runs(20, model_profile="other-class-ref")
+    with pytest.raises(ValueError, match="0 clean runs"):
+        promote_to_validated(tmp_catalog, **KEY, runs=stale, threshold=20,
+                             run_lockbuild=lambda root: None, commit=lambda p, m: None)
+
+
+def test_only_key_matching_runs_count_toward_a_mixed_evidence_set(tmp_catalog):
+    matching = _keyed_runs(20)
+    other_version = _keyed_runs(5, entry_version="0.2.0")
+    digest = promote_to_validated(tmp_catalog, **KEY, runs=matching + other_version,
+                                  threshold=20, run_lockbuild=lambda root: None,
+                                  commit=lambda p, m: None)
+    assert digest == evidence_digest(matching)
+
+
+# Fix 8 — align _trailing_clean with the store's supervised_streak: a
+# trailing pending row is skipped, not treated as a streak-breaking gap.
+
+def test_a_trailing_pending_run_does_not_zero_the_streak(tmp_catalog):
+    runs = _runs(20) + [{"run_id": 20, "invocation_id": "open", "mode": "canary",
+                         "verdict": "pending", "reason": "", "adjudicated_by": None}]
+    digest = promote_to_validated(tmp_catalog, **KEY, runs=runs, threshold=20,
+                                  run_lockbuild=lambda root: None,
+                                  commit=lambda p, m: None)
+    assert digest == evidence_digest(runs)  # digest carries the pending row too
+
+
+def test_a_pending_run_is_never_itself_counted_toward_the_streak(tmp_catalog):
+    clean = [{"run_id": i, "invocation_id": f"inv{i}", "mode": "shadow",
+             "verdict": "clean", "reason": "", "adjudicated_by": None}
+            for i in range(1, 20)]  # 19 clean runs, ids 1..19
+    pending = [{"run_id": 0, "invocation_id": "open", "mode": "canary",
+               "verdict": "pending", "reason": "", "adjudicated_by": None}]
+    with pytest.raises(ValueError, match="19 clean runs"):
+        promote_to_validated(tmp_catalog, **KEY, runs=clean + pending, threshold=20,
+                             run_lockbuild=lambda root: None, commit=lambda p, m: None)

@@ -121,14 +121,20 @@ def test_operator_authorization_joins_tiers(client, store, catalog_repo, setting
     demote_all(catalog_repo)                            # everything quarantined
     client.post("/session/new")
 
-    # plain user: refused
+    # plain user: refused at the tier check, never reaches quarantined dispatch
     r = client.post("/tasks", data={"task": TASK})
-    assert "STALE_ENTRY" in r.text
+    assert "refused at live tier" in r.text
 
-    # operator (gateway-injected identity): quarantined is within allowed tiers
+    # operator (gateway-injected identity): quarantined is within allowed
+    # tiers, so the operator reaches supervised dispatch instead of the
+    # tier-refusal (Fix 1: the /tasks cascade applies the same layer-8
+    # supervision gate as the direct invoke route) — refused here for lack
+    # of an evidence path (no counterpart, no canary opt-in), not for tier
+    # authorization.
     r = client.post("/tasks", data={"task": TASK},
                     headers={"X-Forwarded-User": "op@example.com"})
-    assert "STALE_ENTRY" not in r.text
+    assert "refused at live tier" not in r.text
+    assert "supervised invocation unavailable" in r.text
 
 
 def test_stale_lock_entry_is_refused_and_queued(client, store, catalog_repo):

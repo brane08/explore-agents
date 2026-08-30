@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 import pytest
+import yaml
 
 from orchestrator.store import SQLiteStore
 
@@ -62,6 +63,19 @@ def test_a_pending_run_does_not_count_toward_the_streak(store):
     assert [r.invocation_id for r in store.pending_supervised_runs()] == ["open"]
 
 
+def test_closing_an_already_closed_run_raises(store):
+    """Fix 2: the evidence ledger is append-only-in-effect — a row must not
+    be reopened/reclosed once it has a verdict."""
+    rid = store.open_supervised_run(**KEY, invocation_id="i1", mode="shadow")
+    store.close_supervised_run(rid, verdict="clean")
+
+    with pytest.raises(ValueError):
+        store.close_supervised_run(rid, verdict="incident", reason="second close")
+
+    # the original verdict must be unchanged by the rejected second close
+    assert store.supervised_runs(KEY["entry_id"])[0].verdict == "clean"
+
+
 def test_evidence_never_crosses_a_version_or_profile_change(store):
     _clean_run(store, 5)
 
@@ -117,6 +131,24 @@ def test_write_capable_agent_with_opt_in_is_canaried():
     plan = select_mode(entry, counterpart=None, read_only_bindings=set(),
                        canary_opt_in={"cron-next-fire-times"})
     assert plan.mode == "canary"
+
+
+def test_write_capable_agent_without_opt_in_is_refused_not_shadowed():
+    """Fix 5: shadow's background run executes the same real write bindings
+    canary's foreground run does — a counterpart being available must not
+    bypass the opt-in gate the way it did before this fix."""
+    entry = dict(TYPED, bindings=[{"id": "db-writer", "version": "1.0.0"}])
+    plan = select_mode(entry, counterpart=COUNTERPART, read_only_bindings=set(),
+                       canary_opt_in=set())
+    assert plan.mode == "refuse"
+    assert "canary opt-in" in plan.reason
+
+
+def test_write_capable_agent_with_opt_in_is_shadowed():
+    entry = dict(TYPED, bindings=[{"id": "db-writer", "version": "1.0.0"}])
+    plan = select_mode(entry, counterpart=COUNTERPART, read_only_bindings=set(),
+                       canary_opt_in={"cron-next-fire-times"})
+    assert plan.mode == "shadow"
 
 
 def test_read_only_bindings_keep_an_agent_canary_eligible():
@@ -281,11 +313,23 @@ def supervised_settings(catalog_repo, tmp_path):
               bindings=[{"id": "es_aggregate", "version": "1.0.0"}])
     grant_tier(catalog_repo, "write-capable-agent", "quarantined")
 
+    # Prose (non-structured) so select_mode never offers shadow even though a
+    # counterpart (counterpart-agent, same routing_summary) exists; opted
+    # into canary. Fix 4's canary-fallback test forces this agent's own run
+    # to error (via monkeypatching run_invocation for this agent_id only)
+    # and asserts the counterpart's result reaches the caller instead.
+    add_agent(catalog_repo, "canary-agent",
+              "Count the things in a batch and report the total.",
+              structured_output=False,
+              bindings=[{"id": "es_aggregate", "version": "1.0.0"}])
+    grant_tier(catalog_repo, "canary-agent", "quarantined")
+
     rebuild_and_commit(catalog_repo, "add layer 8 supervision fixtures")
     return Settings(
         catalog_root=catalog_repo, db_path=tmp_path / "sup-orch.sqlite3",
         secret_key="test-secret", operator_users=("op@example.com",),
         read_only_bindings=frozenset({_READ_ONLY_BINDING}),
+        canary_opt_in=frozenset({"canary-agent"}),
     )
 
 
@@ -335,6 +379,74 @@ def test_refused_supervision_names_the_failed_precondition(supervised_client, su
     assert supervised_store.supervised_runs("write-capable-agent") == []
 
 
+def test_counterpart_probe_miss_does_not_pollute_the_backlog(
+        supervised_client, supervised_store):
+    """Fix 3: `_counterpart_for` re-runs the routing cascade as a probe — a
+    probe miss must not look like a real routing refusal and write
+    B2b-backlog (`record_error`) / stale-queue rows."""
+    supervised_client.post("/agents/write-capable-agent/invoke",
+                           data={"task": "do a thing"})
+
+    assert supervised_store.error_records() == []
+    assert supervised_store.stale_queue() == []
+
+
+def test_canary_run_that_errors_falls_back_to_the_counterpart(
+        supervised_client, supervised_store, monkeypatch):
+    """Fix 4: canary-agent is prose (never shadow-eligible) and opted into
+    canary. Force its own run to error (its bindings otherwise resolve and
+    execute fine) and assert the caller still receives the counterpart's
+    result, not the raw failure, with the ledger recording what happened."""
+    from orchestrator.executor import run_invocation as real_run_invocation
+
+    def flaky(*args, **kwargs):
+        if kwargs.get("agent_id") == "canary-agent":
+            raise RuntimeError("simulated agent crash")
+        return real_run_invocation(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.webapp.run_invocation", flaky)
+
+    response = supervised_client.post("/agents/canary-agent/invoke",
+                           data={"task": "count the things"})
+    assert response.status_code == 200
+
+    m = re.search(r"/invocations/([0-9a-f]+)", response.text)
+    assert m is not None
+    inv_id = m.group(1)
+
+    events = supervised_store.events_after(inv_id, 0)
+    terminal = [e for e in events if e.event_type == "terminal"][0]
+    assert terminal.data["status"] == "COMPLETE"
+    assert "COUNTERPART-OUTPUT" in terminal.data["result_ref"]
+
+    run = supervised_store.supervised_runs("canary-agent")[0]
+    assert run.mode == "canary"
+    assert run.verdict == "incident"
+    assert "simulated agent crash" in run.reason
+
+
+def test_tasks_cascade_supervises_a_quarantined_match(
+        supervised_client, supervised_store, monkeypatch):
+    """Fix 1: the `/tasks` cascade must apply the same quarantined-tier
+    supervision gate as the direct invoke route — an operator's task that
+    routes to a quarantined, write-capable, non-opted-in entry is refused
+    with the supervised-invocation-unavailable message, not silently run
+    unsupervised via `_execute`."""
+    calls = []
+    monkeypatch.setattr("orchestrator.webapp.run_invocation",
+                        lambda *a, **k: calls.append(k) or (True, "ok"))
+    supervised_client.headers.update({"X-Forwarded-User": "op@example.com",
+                                      "X-Forwarded-Roles": "operator"})
+
+    response = supervised_client.post(
+        "/tasks", data={"task": "do a thing that writes state"})
+
+    assert "STALE_ENTRY" in response.text
+    assert "no evidence path" in response.text
+    assert calls == []
+    assert supervised_store.supervised_runs("write-capable-agent") == []
+
+
 # Canary review screen (Task 5)
 
 
@@ -364,6 +476,51 @@ def test_voiding_records_the_reason(operator_client, store):
 
     run = store.supervised_runs("cron-next-fire-times")[0]
     assert (run.verdict, run.reason) == ("void", "tool plane down")
+
+
+def test_adjudicating_a_run_via_a_different_agents_path_is_rejected(operator_client, store):
+    """Fix 2 IDOR guard: `run_id` is form-supplied and the ledger has no
+    per-agent partitioning at the SQL level — the URL path's `agent_id`
+    must still scope which run a request can touch."""
+    rid = open_canary(store, entry=TYPED, model_profile="stub-class-ref",
+                      invocation_id="i1")
+
+    response = operator_client.post(
+        "/canary/some-other-agent/adjudicate",
+        data={"run_id": rid, "verdict": "clean"})
+
+    assert response.status_code == 404
+    assert store.supervised_runs("cron-next-fire-times")[0].verdict == "pending"
+
+
+def test_adjudicating_an_already_closed_run_is_rejected(operator_client, store):
+    rid = open_canary(store, entry=TYPED, model_profile="stub-class-ref",
+                      invocation_id="i1")
+    store.close_supervised_run(rid, verdict="clean")
+
+    response = operator_client.post(
+        "/canary/cron-next-fire-times/adjudicate",
+        data={"run_id": rid, "verdict": "incident"})
+
+    assert response.status_code == 409
+    assert store.supervised_runs("cron-next-fire-times")[0].verdict == "clean"
+
+
+def test_canary_key_uses_the_most_recent_run_when_the_entry_is_gone(
+        operator_client, store):
+    """Fix 7: `supervised_runs` is ascending by run_id — the most recent run
+    is the last element, not the first."""
+    for version in ("0.1.0", "0.2.0"):
+        rid = store.open_supervised_run(
+            entry_id="ghost-agent", entry_version=version,
+            model_profile="stub-class-ref", invocation_id=f"i-{version}",
+            mode="canary")
+        store.close_supervised_run(rid, verdict="clean")
+
+    body = operator_client.get("/canary/ghost-agent").text
+
+    assert "0.2.0" in body
+    assert "0.1.0" not in body
 
 
 def test_demote_redirects_instead_of_re_rendering(operator_client, store):
@@ -432,3 +589,55 @@ def test_screen_shows_the_streak_and_whether_the_key_is_eligible(
     m = re.search(r"streak[^0-9]{0,40}?(\d+)", body, re.IGNORECASE)
     assert m is not None and m.group(1) == "2", body
     assert "not eligible" in body.lower()  # threshold is 20
+
+
+# Recall regression (Task 7): a live trust.yaml demotion must refuse the very
+# next invocation, with no lock rebuild and no new session — this predates
+# this plan (Phase 1) and Task 4's quarantined-dispatch branch must not have
+# broken it for non-quarantined tiers.
+
+
+@pytest.fixture
+def recall_settings(catalog_repo, tmp_path):
+    """Own settings/store/client trio, following the streak_* precedent
+    above: seeds a real, lockbuild-resolvable `validated-agent` entry at
+    tier `validated` so the live tier check in webapp.py's invoke_agent
+    (`transitive_tier(load_records(...), entry, lock, model_profile)`) has
+    something to demote out from under."""
+    add_agent(catalog_repo, "validated-agent", "Do a validated thing.")
+    grant_tier(catalog_repo, "validated-agent", "validated")
+    rebuild_and_commit(catalog_repo, "add recall-regression fixture entry")
+    return Settings(
+        catalog_root=catalog_repo, db_path=tmp_path / "recall-orch.sqlite3",
+        secret_key="test-secret", operator_users=("op@example.com",),
+    )
+
+
+@pytest.fixture
+def recall_store(recall_settings):
+    return SQLiteStore(recall_settings.db_path)
+
+
+@pytest.fixture
+def recall_client(recall_settings, recall_store):
+    app = create_app(recall_settings, store=recall_store,
+                     scorer=lexical_scorer, invoke_tool=_supervised_invoker)
+    return TestClient(app)
+
+
+def test_demotion_takes_effect_at_routing_time_without_a_lock_rebuild(
+        recall_client, recall_settings):
+    """Layer 8 [M] recall: demote in the live trust.yaml, assert the next
+    invocation refuses — no lockbuild, no new session."""
+    ok = recall_client.post("/agents/validated-agent/invoke", data={"task": "go"})
+    assert ok.status_code == 200
+
+    trust = recall_settings.catalog_root / "trust.yaml"
+    data = yaml.safe_load(trust.read_text())
+    data["records"].append({"id": "validated-agent", "version": "1.0.0",
+                            "model_profile": recall_settings.model_profile,
+                            "tier": "untrusted", "granted_by": "recall-test"})
+    trust.write_text(yaml.safe_dump(data, sort_keys=True))
+
+    after = recall_client.post("/agents/validated-agent/invoke", data={"task": "go"})
+    assert "STALE_ENTRY" in after.text

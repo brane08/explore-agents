@@ -35,18 +35,39 @@ def evidence_digest(runs: list[dict]) -> str:
 def _trailing_clean(runs: list[dict]) -> int:
     streak = 0
     for run in sorted(runs, key=lambda r: r["run_id"], reverse=True):
-        if run["verdict"] == "void":
-            continue                      # did not measure the agent
+        if run["verdict"] in ("void", "pending"):
+            # void: did not measure the agent. pending: not yet adjudicated —
+            # the store's own supervised_streak() (store.py) already excludes
+            # pending rows from the count rather than treating them as a
+            # streak-breaking gap; a trailing un-adjudicated row must not zero
+            # out an otherwise-valid streak here either.
+            continue
         if run["verdict"] != "clean":
             break
         streak += 1
     return streak
 
 
+def _matches_key(run: dict, entry_id: str, version: str, model_profile: str) -> bool:
+    """A run dict is scoped to this promotion's key if every key field it
+    carries agrees with the key — a run missing a key field entirely is
+    treated as already scoped by the caller (existing test fixtures and any
+    caller that pre-filters before handing runs in). A run that *does* carry
+    a key field with a different value is out of scope: design §4's "evidence
+    does not cross the key" rule, so evidence gathered on a different
+    version/profile must never count toward this promotion's streak."""
+    for field, want in (("entry_id", entry_id), ("entry_version", version),
+                        ("model_profile", model_profile)):
+        if field in run and run[field] != want:
+            return False
+    return True
+
+
 def promote_to_validated(catalog_root: Path, *, entry_id: str, version: str,
                          model_profile: str, runs: list[dict], threshold: int,
                          run_lockbuild: Callable[[Path], None],
                          commit: Callable[[list[Path], str], None]) -> str:
+    runs = [r for r in runs if _matches_key(r, entry_id, version, model_profile)]
     streak = _trailing_clean(runs)
     if streak < threshold:
         raise ValueError(

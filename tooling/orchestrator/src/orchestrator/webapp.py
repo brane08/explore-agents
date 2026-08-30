@@ -278,7 +278,12 @@ def create_app(
 
     def _counterpart_for(task_text: str, lock: dict, entry: dict, session) -> dict | None:
         """The entry the cascade would have routed to if this agent did not
-        exist — the comparison the caller would otherwise have received."""
+        exist — the comparison the caller would otherwise have received.
+
+        This is a probe, not a real dispatch: a miss must not look like a
+        routing refusal. `record_side_effects=False` stops it from writing
+        `record_error`/`queue_stale` rows into the B2b backlog and stale
+        queue on every supervised dispatch that doesn't find a counterpart."""
         records = load_records(settings.catalog_root)
         pruned = dict(lock, entries=[
             e for e in lock.get("entries", [])
@@ -286,35 +291,43 @@ def create_app(
             and transitive_tier(records, e, lock, settings.model_profile) == "validated"
         ])
         result = route(task_text, pruned, settings.catalog_root, session.user_sub,
-                       scorer, settings, store, operator=False)
+                       scorer, settings, store, operator=False,
+                       record_side_effects=False)
         return result.agent_entry if result.outcome == "invoke-agent" else None
+
+    def _run_agent(inv_id: str, session, task_text: str, agent_entry: dict,
+                   lock: dict, *, supervised: bool) -> tuple[bool, str]:
+        """Foreground run of `agent_entry` on invocation `inv_id`; returns
+        (ok, result_ref). Does not emit the terminal event — callers decide
+        when (or whether) to close the invocation, since canary's fallback
+        needs to run a second agent on the same `inv_id` before anything
+        terminal is recorded. Must never raise."""
+        tools = _resolve_bindings(lock, agent_entry)
+        try:
+            if tools is None:
+                return False, f"{agent_entry['id']} has bindings missing at the pinned ref"
+            return run_invocation(
+                store, inv_id,
+                agent_id=agent_entry["id"], agent_version=agent_entry["version"],
+                model_profile=settings.model_profile,
+                catalog_ref=session.catalog_ref,
+                task_text=task_text, tools=tools,
+                invoke_tool=invoke_tool, scorer=scorer, supervised=supervised,
+            )
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
 
     def _run_agent_now(inv_id: str, session, task_text: str, agent_entry: dict,
                        lock: dict, *, supervised: bool) -> tuple[bool, str]:
-        """Foreground run of `agent_entry` on invocation `inv_id`; emits the
-        `invocation`/`node`/`tool_call` trace plus the terminal event, and
-        returns (ok, result_ref) the way `_execute` would once it completes.
+        """`_run_agent` plus the terminal event, the way `_execute` would once
+        it completes.
 
         Used both for a shadow mode's counterpart (supervised=False — a
         normal validated run) and for the quarantined agent's own run in
         either mode (supervised=True). Must never raise, same invariant as
         `_execute`: every exit path emits a terminal event."""
-        tools = _resolve_bindings(lock, agent_entry)
-        try:
-            if tools is None:
-                ok, result_ref = False, (
-                    f"{agent_entry['id']} has bindings missing at the pinned ref")
-            else:
-                ok, result_ref = run_invocation(
-                    store, inv_id,
-                    agent_id=agent_entry["id"], agent_version=agent_entry["version"],
-                    model_profile=settings.model_profile,
-                    catalog_ref=session.catalog_ref,
-                    task_text=task_text, tools=tools,
-                    invoke_tool=invoke_tool, scorer=scorer, supervised=supervised,
-                )
-        except Exception as exc:
-            ok, result_ref = False, f"{type(exc).__name__}: {exc}"
+        ok, result_ref = _run_agent(inv_id, session, task_text, agent_entry, lock,
+                                    supervised=supervised)
         store.append_event(inv_id, "terminal", {
             "status": "COMPLETE" if ok else "ERROR", "result_ref": result_ref,
         })
@@ -322,9 +335,13 @@ def create_app(
         return ok, result_ref
 
     def _dispatch_supervised(plan, entry: dict, invocation, session, task_text: str,
-                             background: BackgroundTasks, created: bool) -> HTMLResponse:
+                             background: BackgroundTasks, created: bool,
+                             counterpart: dict | None) -> HTMLResponse:
         """`plan.mode` is "shadow" or "canary" — "refuse" is handled by the
-        caller before this is ever reached.
+        caller before this is ever reached. `counterpart` is the entry
+        `_counterpart_for` found (may be None) — shadow ignores it and uses
+        `plan.counterpart` (guaranteed set when mode is shadow); canary uses
+        it for its error fallback.
 
         Shadow: the counterpart runs in the foreground and its result is the
         HTTP response; the quarantined agent's own run happens in a
@@ -332,8 +349,13 @@ def create_app(
         and its (real) output feeds `run_shadow` once it completes.
 
         Canary: the quarantined agent serves the request itself — same
-        async dispatch pattern as an ordinary invoke — and a `pending` row
-        is opened for a human to adjudicate once it completes."""
+        async dispatch pattern as an ordinary invoke. On success a `pending`
+        row is opened for a human to adjudicate. On failure the error is
+        agent-attributable evidence (design §4), so the row auto-closes
+        `incident` and the caller is served the counterpart's result instead
+        of the raw failure (design §2.3 / layer 8 "canary with fallback");
+        with no counterpart to fall back to, the caller gets the standard
+        refusal convention instead of a propagated failure."""
         lock = _pinned_lock(session)
 
         if plan.mode == "shadow":
@@ -365,10 +387,32 @@ def create_app(
             )
         else:  # canary
             def _canary_task() -> None:
-                _run_agent_now(invocation.invocation_id, session, task_text, entry, lock,
-                               supervised=True)
-                open_canary(store, entry=entry, model_profile=settings.model_profile,
-                           invocation_id=invocation.invocation_id)
+                ok, result_ref = _run_agent(invocation.invocation_id, session, task_text,
+                                            entry, lock, supervised=True)
+                run_id = open_canary(store, entry=entry, model_profile=settings.model_profile,
+                                     invocation_id=invocation.invocation_id)
+                if ok:
+                    store.append_event(invocation.invocation_id, "terminal", {
+                        "status": "COMPLETE", "result_ref": result_ref,
+                    })
+                    store.set_invocation(invocation.invocation_id, status="complete")
+                    return
+                # agent-attributable execution error (design §4) — close the
+                # ledger row now rather than leaving it pending for adjudication
+                store.close_supervised_run(run_id, verdict="incident", reason=result_ref)
+                if counterpart is not None:
+                    _run_agent_now(invocation.invocation_id, session, task_text,
+                                   counterpart, lock, supervised=False)
+                else:
+                    err = StructuredError(
+                        "STALE_ENTRY",
+                        f"{entry['id']} canary run failed, no counterpart to fall "
+                        f"back to: {result_ref}")
+                    store.append_event(invocation.invocation_id, "terminal", {
+                        "status": "ERROR",
+                        "result_ref": f"{err.code} {err.context}",
+                    })
+                    store.set_invocation(invocation.invocation_id, status="error")
 
             background.add_task(_canary_task)
             response = page("task_started.html.j2", invocation=invocation)
@@ -376,6 +420,25 @@ def create_app(
         if created:
             attach_cookie(response, session)
         return response
+
+    def _dispatch_quarantined(entry: dict, invocation, session, task_text: str,
+                              lock: dict, background: BackgroundTasks,
+                              created: bool) -> HTMLResponse:
+        """Layer 8: quarantined agents run only in supervised mode. Shared by
+        the direct invoke route (`/agents/{id}/invoke`) and the routing
+        cascade (`/tasks`) — both reach a quarantined entry, and it is the
+        same invariant either way. Caller must already know `entry`'s live
+        tier is `quarantined` before calling this."""
+        counterpart = _counterpart_for(task_text, lock, entry, session)
+        plan = select_mode(entry, counterpart=counterpart,
+                           read_only_bindings=set(settings.read_only_bindings),
+                           canary_opt_in=set(settings.canary_opt_in))
+        if plan.mode == "refuse":
+            return _refuse(invocation, session, created,
+                           f"{entry['id']} supervised invocation unavailable: "
+                           f"{plan.reason}")
+        return _dispatch_supervised(plan, entry, invocation, session, task_text,
+                                    background, created, counterpart)
 
     @app.post("/tasks", response_class=HTMLResponse)
     def submit_task(request: Request, background: BackgroundTasks,
@@ -426,6 +489,13 @@ def create_app(
         else:
             if result.outcome == "invoke-agent":
                 agent_entry = result.agent_entry
+                # same invariant as the direct invoke route: a quarantined
+                # entry reached via the cascade still runs only supervised
+                records = load_records(settings.catalog_root)
+                tier = transitive_tier(records, agent_entry, lock, settings.model_profile)
+                if tier == "quarantined":
+                    return _dispatch_quarantined(agent_entry, invocation, session, task,
+                                                 lock, background, created)
                 tools = _resolve_bindings(lock, agent_entry)
                 if tools is None:
                     return _refuse(invocation, session, created,
@@ -596,16 +666,8 @@ def create_app(
             # an operator's unsupervised pass-through, since allowed_tiers()
             # grants operators every tier.
             invocation = store.create_invocation(session.session_id, agent_id)
-            counterpart = _counterpart_for(task, lock, entry, session)
-            plan = select_mode(entry, counterpart=counterpart,
-                               read_only_bindings=set(settings.read_only_bindings),
-                               canary_opt_in=set(settings.canary_opt_in))
-            if plan.mode == "refuse":
-                return _refuse(invocation, session, created,
-                               f"{agent_id} supervised invocation unavailable: "
-                               f"{plan.reason}")
-            return _dispatch_supervised(plan, entry, invocation, session, task,
-                                        background, created)
+            return _dispatch_quarantined(entry, invocation, session, task, lock,
+                                         background, created)
         if tier not in allowed_tiers(session.user_sub, settings,
                                      operator=is_operator(request)):
             store.queue_stale(entry["id"], f"tier:{tier}")
@@ -800,8 +862,21 @@ def create_app(
         if entry is not None:
             return entry.get("version", ""), settings.model_profile
         if runs:
-            return runs[0].entry_version, runs[0].model_profile
+            # `runs` is ascending by run_id (supervised_runs' ordering) — the
+            # most recent run is the last element, not the first.
+            return runs[-1].entry_version, runs[-1].model_profile
         return "", settings.model_profile
+
+    def _run_in_scope_or_404(agent_id: str, run_id: int):
+        """The ledger has no per-agent partitioning at the SQL level, so a
+        form-supplied `run_id` could name a row for any agent — guard the
+        adjudicate/void routes against closing (or leaking the existence of)
+        a run that doesn't belong to the `{agent_id}` named in the URL path."""
+        run = next((r for r in store.supervised_runs(agent_id) if r.run_id == run_id),
+                   None)
+        if run is None:
+            raise HTTPException(status_code=404, detail="no such run for this agent")
+        return run
 
     @app.get("/canary/{agent_id}", response_class=HTMLResponse)
     def canary_review(agent_id: str, request: Request, demoted: bool = False,
@@ -822,6 +897,9 @@ def create_app(
                           verdict: str = Form(...), _=Depends(require_operator)):
         if verdict not in {"clean", "incident"}:
             raise HTTPException(status_code=400, detail="verdict must be clean|incident")
+        run = _run_in_scope_or_404(agent_id, run_id)
+        if run.verdict != "pending":
+            raise HTTPException(status_code=409, detail=f"run {run_id} is already {run.verdict}")
         store.close_supervised_run(run_id, verdict=verdict,
                                    adjudicated_by=user_sub(request))
         return RedirectResponse(f"/canary/{agent_id}", status_code=303)
@@ -829,6 +907,9 @@ def create_app(
     @app.post("/canary/{agent_id}/void")
     def canary_void(agent_id: str, request: Request, run_id: int = Form(...),
                     reason: str = Form(...), _=Depends(require_operator)):
+        run = _run_in_scope_or_404(agent_id, run_id)
+        if run.verdict != "pending":
+            raise HTTPException(status_code=409, detail=f"run {run_id} is already {run.verdict}")
         store.close_supervised_run(run_id, verdict="void", reason=reason,
                                    adjudicated_by=user_sub(request))
         return RedirectResponse(f"/canary/{agent_id}", status_code=303)

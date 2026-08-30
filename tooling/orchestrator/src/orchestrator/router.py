@@ -66,6 +66,7 @@ def route(
     settings: Settings,
     store: Store,
     operator: bool = False,
+    record_side_effects: bool = True,
 ) -> RoutingResult:
     events: list[RoutingEvent] = []
     records = load_records(catalog_root)
@@ -89,7 +90,8 @@ def route(
             break
         if entry.get("stale"):
             # refused, queued for rebase/eval-rerun; try the next candidate
-            store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
+            if record_side_effects:
+                store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
             events.append(RoutingEvent(
                 "agent-match", entry["id"],
                 note=f"STALE_ENTRY {entry['id']} {entry.get('stale_reason', '')}".strip(),
@@ -104,7 +106,8 @@ def route(
             tier = transitive_tier(records, entry, lock, settings.model_profile)
             if tier not in user_tiers:
                 # live (recalled or insufficient) tier — refuse, no fallback
-                store.queue_stale(entry["id"], f"tier:{tier}")
+                if record_side_effects:
+                    store.queue_stale(entry["id"], f"tier:{tier}")
                 err = StructuredError("STALE_ENTRY", f"{entry['id']} refused at live tier {tier}")
                 events.append(RoutingEvent("refused", entry["id"], note=err.context))
                 return RoutingResult("error", events, error=err)
@@ -119,7 +122,8 @@ def route(
     candidates: list[tuple[dict, str]] = []
     for entry in entries_by_kind(lock, "skill", "mcp-tool"):
         if entry.get("stale"):
-            store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
+            if record_side_effects:
+                store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
             events.append(RoutingEvent(
                 "b1-coverage", entry["id"],
                 note=f"STALE_ENTRY {entry['id']} {entry.get('stale_reason', '')}".strip(),
@@ -144,7 +148,8 @@ def route(
 
     # --- 4. residual gap --------------------------------------------------------
     residual = normalize_residual(task_text)
-    store.record_error("PATTERN_UNRECOGNIZED", residual)
+    if record_side_effects:
+        store.record_error("PATTERN_UNRECOGNIZED", residual)
     err = StructuredError("PATTERN_UNRECOGNIZED", residual)
     events.append(RoutingEvent("unrecognized", note=residual))
     return RoutingResult("error", events, error=err)
