@@ -1,6 +1,8 @@
 """CHECKLISTS layer 3 [M] — routing over the pinned-epoch lock."""
 from __future__ import annotations
 
+import pytest
+
 from orch_fixtures import GIBBERISH, TASK, add_skill, demote_all, rebuild_and_commit
 from orchestrator.router import route
 from orchestrator.scoring import lexical_scorer
@@ -115,20 +117,68 @@ def test_stale_tool_is_refused_from_b1_coverage(catalog_repo, settings, store):
         assert all(t["id"] != "es_search" for t in result.tools)
 
 
+def test_recalled_b1_tool_is_reported_not_silently_dropped(catalog_repo, settings, store):
+    """Router-recall F1: a candidate that scores above coverage threshold but
+    fails the *live* tier check (recalled, not lock-stale) must be reported
+    the same way a stale entry is — STALE_ENTRY event + queue_stale — not
+    silently dropped, which would let a real coverage gap masquerade as
+    PATTERN_UNRECOGNIZED and trigger duplicate B2 generation for a capability
+    that was recalled, not missing."""
+    from lockbuild.build import build_lock
+    from orch_fixtures import grant_tier
+
+    lock = build_lock(catalog_repo)
+    grant_tier(catalog_repo, "es_search", "quarantined")
+
+    result = route(TASK, lock, catalog_repo, "user@example.com",
+                    lexical_scorer, settings, store)
+
+    recall_notes = [e for e in result.events
+                    if e.cascade_step == "b1-coverage" and e.entry_id == "es_search"
+                    and "STALE_ENTRY" in e.note and "tier" in e.note]
+    assert recall_notes, [e.data() for e in result.events]
+    assert ("es_search", "tier:quarantined") in store.stale_queue()
+    if result.outcome == "assemble-b1":
+        assert all(t["id"] != "es_search" for t in result.tools)
+    assert result.outcome != "error" or result.error.code != "PATTERN_UNRECOGNIZED"
+
+
+def test_a_template_entry_in_the_lock_is_not_silently_skipped(catalog_repo, settings, store):
+    """Router-recall F3: template-match routing isn't built yet (Phase 3), and
+    the cascade must never claim 'no template entries' when the lock actually
+    has one — that would bypass a template that should have handled the task
+    and misroute it into B1 coverage or PATTERN_UNRECOGNIZED in silence."""
+    from lockbuild.build import build_lock
+
+    lock = build_lock(catalog_repo)
+    lock["entries"].append({"id": "phantom-template", "kind": "template",
+                            "version": "1.0.0"})
+
+    with pytest.raises(NotImplementedError, match="template"):
+        route(TASK, lock, catalog_repo, "user@example.com",
+             lexical_scorer, settings, store)
+
+
 def test_operator_authorization_joins_tiers(client, store, catalog_repo, settings):
     client.get("/")
     client.post("/tasks", data={"task": TASK})          # registers b1 agent
     demote_all(catalog_repo)                            # everything quarantined
     client.post("/session/new")
 
-    # plain user: refused
+    # plain user: refused at the tier check, never reaches quarantined dispatch
     r = client.post("/tasks", data={"task": TASK})
-    assert "STALE_ENTRY" in r.text
+    assert "refused at live tier" in r.text
 
-    # operator (gateway-injected identity): quarantined is within allowed tiers
+    # operator (gateway-injected identity): quarantined is within allowed
+    # tiers, so the operator reaches supervised dispatch instead of the
+    # tier-refusal (Fix 1: the /tasks cascade applies the same layer-8
+    # supervision gate as the direct invoke route) — refused here for lack
+    # of an evidence path (no counterpart, no canary opt-in), not for tier
+    # authorization.
     r = client.post("/tasks", data={"task": TASK},
                     headers={"X-Forwarded-User": "op@example.com"})
-    assert "STALE_ENTRY" not in r.text
+    assert "refused at live tier" not in r.text
+    assert "supervised invocation unavailable" in r.text
 
 
 def test_stale_lock_entry_is_refused_and_queued(client, store, catalog_repo):

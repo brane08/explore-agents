@@ -48,6 +48,7 @@ from orchestrator.lockload import current_ref, entry_by_id, load_lock_at
 from orchestrator.router import allowed_tiers, route
 from orchestrator.scoring import Scorer, ScorerError, select_scorer
 from orchestrator.store import SQLiteStore, Store
+from orchestrator.supervise import open_canary, open_shadow, run_shadow, select_mode
 from orchestrator.trustcheck import load_records, transitive_tier
 
 logger = logging.getLogger(__name__)
@@ -225,7 +226,7 @@ def create_app(
         agent_id = agent_entry["id"] if agent_entry else "b1-candidate"
         version = agent_entry["version"] if agent_entry else "1.0.0"
         try:
-            ok, result_ref = run_invocation(
+            ok, result_ref, _result = run_invocation(
                 store, invocation_id,
                 agent_id=agent_id, agent_version=version,
                 model_profile=settings.model_profile,
@@ -274,6 +275,201 @@ def create_app(
                 status_code=409,
                 detail="pinned catalog ref is no longer resolvable — start a new session",
             )
+
+    def _counterpart_for(task_text: str, lock: dict, entry: dict, session) -> dict | None:
+        """The entry the cascade would have routed to if this agent did not
+        exist — the comparison the caller would otherwise have received.
+
+        This is a probe, not a real dispatch: a miss must not look like a
+        routing refusal. `record_side_effects=False` stops it from writing
+        `record_error`/`queue_stale` rows into the B2b backlog and stale
+        queue on every supervised dispatch that doesn't find a counterpart."""
+        records = load_records(settings.catalog_root)
+        pruned = dict(lock, entries=[
+            e for e in lock.get("entries", [])
+            if e["id"] != entry["id"]
+            and transitive_tier(records, e, lock, settings.model_profile) == "validated"
+        ])
+        result = route(task_text, pruned, settings.catalog_root, session.user_sub,
+                       scorer, settings, store, operator=False,
+                       record_side_effects=False)
+        return result.agent_entry if result.outcome == "invoke-agent" else None
+
+    def _run_agent(inv_id: str, session, task_text: str, agent_entry: dict,
+                   lock: dict, *, supervised: bool) -> tuple[bool, str, dict]:
+        """Foreground run of `agent_entry` on invocation `inv_id`; returns
+        (ok, result_ref, result). Does not emit the terminal event — callers
+        decide when (or whether) to close the invocation, since canary's
+        fallback needs to run a second agent on the same `inv_id` before
+        anything terminal is recorded. Must never raise."""
+        tools = _resolve_bindings(lock, agent_entry)
+        try:
+            if tools is None:
+                msg = f"{agent_entry['id']} has bindings missing at the pinned ref"
+                return False, msg, {"error": msg}
+            return run_invocation(
+                store, inv_id,
+                agent_id=agent_entry["id"], agent_version=agent_entry["version"],
+                model_profile=settings.model_profile,
+                catalog_ref=session.catalog_ref,
+                task_text=task_text, tools=tools,
+                invoke_tool=invoke_tool, scorer=scorer, supervised=supervised,
+            )
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            return False, msg, {"error": msg}
+
+    def _run_agent_now(inv_id: str, session, task_text: str, agent_entry: dict,
+                       lock: dict, *, supervised: bool) -> tuple[bool, str, dict]:
+        """`_run_agent` plus the terminal event, the way `_execute` would once
+        it completes.
+
+        Used both for a shadow mode's counterpart (supervised=False — a
+        normal validated run) and for the quarantined agent's own run in
+        either mode (supervised=True). Must never raise, same invariant as
+        `_execute`: every exit path emits a terminal event."""
+        ok, result_ref, result = _run_agent(inv_id, session, task_text, agent_entry, lock,
+                                            supervised=supervised)
+        store.append_event(inv_id, "terminal", {
+            "status": "COMPLETE" if ok else "ERROR", "result_ref": result_ref,
+        })
+        store.set_invocation(inv_id, status="complete" if ok else "error")
+        return ok, result_ref, result
+
+    def _dispatch_supervised(plan, entry: dict, invocation, session, task_text: str,
+                             lock: dict, background: BackgroundTasks, created: bool,
+                             counterpart: dict | None) -> HTMLResponse:
+        """`plan.mode` is "shadow" or "canary" — "refuse" is handled by the
+        caller before this is ever reached. `counterpart` is the entry
+        `_counterpart_for` found (may be None) — shadow ignores it and uses
+        `plan.counterpart` (guaranteed set when mode is shadow); canary uses
+        it for its error fallback.
+
+        Shadow: the counterpart runs in the foreground and its result is the
+        HTTP response; the quarantined agent's own run happens in a
+        background task so it can never block or leak into that response,
+        and its (real) output feeds `run_shadow` once it completes.
+
+        Canary: the quarantined agent serves the request itself — same
+        async dispatch pattern as an ordinary invoke. On success a `pending`
+        row is opened for a human to adjudicate. On failure the error is
+        agent-attributable evidence (design §4), so the row auto-closes
+        `incident` and the caller is served the counterpart's result instead
+        of the raw failure (design §2.3 / layer 8 "canary with fallback");
+        with no counterpart to fall back to, the caller gets the standard
+        refusal convention instead of a propagated failure."""
+        def _fail_open_invocation(exc: Exception) -> None:
+            # last-resort net (invoke-ui#5): if the invocation trace wasn't
+            # already closed by the try block below, close it here so the
+            # SSE stream never spins until sse_timeout_s with nothing to show.
+            if store.get_invocation(invocation.invocation_id).status == "running":
+                store.append_event(invocation.invocation_id, "terminal", {
+                    "status": "ERROR", "result_ref": f"{type(exc).__name__}: {exc}",
+                })
+                store.set_invocation(invocation.invocation_id, status="error")
+
+        if plan.mode == "shadow":
+            counterpart = plan.counterpart
+            cp_invocation = store.create_invocation(session.session_id, counterpart["id"])
+            cp_ok, cp_ref, cp_result = _run_agent_now(
+                cp_invocation.invocation_id, session, task_text, counterpart, lock,
+                supervised=False)
+
+            # opened before the quarantined agent runs (invoke-ui#4): a crash
+            # between the run finishing and the row committing must not leave
+            # zero evidence for a quarantined agent that served real work.
+            shadow_run_id = open_shadow(
+                store, entry=entry, model_profile=settings.model_profile,
+                invocation_id=invocation.invocation_id, counterpart_id=counterpart["id"])
+
+            def _shadow_task() -> None:
+                # must never raise (invoke-ui#5): _run_agent_now already
+                # guards its own errors, so this only catches a bug in
+                # run_shadow/close_supervised_run leaving the ledger row (or
+                # the invocation trace) stuck with no terminal state.
+                try:
+                    ok, result_ref, result = _run_agent_now(
+                        invocation.invocation_id, session, task_text, entry, lock,
+                        supervised=True)
+                    run_shadow(
+                        store, run_id=shadow_run_id,
+                        counterpart_output=cp_result if cp_ok else None,
+                        shadow_output=result if ok else None,
+                        error=None if ok else result_ref,
+                        predicates=settings.shadow_predicates.get(entry["id"], {}),
+                    )
+                except Exception as exc:
+                    try:
+                        store.close_supervised_run(
+                            shadow_run_id, verdict="incident",
+                            reason=f"{type(exc).__name__}: {exc}")
+                    except ValueError:
+                        pass  # already closed before the exception was raised
+                    _fail_open_invocation(exc)
+
+            background.add_task(_shadow_task)
+            response = page(
+                "invocation.html.j2",
+                invocation=store.get_invocation(cp_invocation.invocation_id),
+                events=store.events_after(cp_invocation.invocation_id, 0),
+            )
+        else:  # canary — select_mode guarantees a counterpart for this mode
+            # opened before the agent runs (invoke-ui#4): see shadow above.
+            canary_run_id = open_canary(store, entry=entry, model_profile=settings.model_profile,
+                                        invocation_id=invocation.invocation_id)
+
+            def _canary_task() -> None:
+                # must never raise (invoke-ui#5): see _shadow_task.
+                try:
+                    ok, result_ref, _result = _run_agent(
+                        invocation.invocation_id, session, task_text,
+                        entry, lock, supervised=True)
+                    if ok:
+                        store.append_event(invocation.invocation_id, "terminal", {
+                            "status": "COMPLETE", "result_ref": result_ref,
+                        })
+                        store.set_invocation(invocation.invocation_id, status="complete")
+                        return
+                    # agent-attributable execution error (design §4) — close
+                    # the ledger row now rather than leaving it pending
+                    store.close_supervised_run(canary_run_id, verdict="incident",
+                                               reason=result_ref)
+                    _run_agent_now(invocation.invocation_id, session, task_text,
+                                   counterpart, lock, supervised=False)
+                except Exception as exc:
+                    try:
+                        store.close_supervised_run(
+                            canary_run_id, verdict="incident",
+                            reason=f"{type(exc).__name__}: {exc}")
+                    except ValueError:
+                        pass
+                    _fail_open_invocation(exc)
+
+            background.add_task(_canary_task)
+            response = page("task_started.html.j2", invocation=invocation)
+
+        if created:
+            attach_cookie(response, session)
+        return response
+
+    def _dispatch_quarantined(entry: dict, invocation, session, task_text: str,
+                              lock: dict, background: BackgroundTasks,
+                              created: bool) -> HTMLResponse:
+        """Layer 8: quarantined agents run only in supervised mode. Shared by
+        the direct invoke route (`/agents/{id}/invoke`) and the routing
+        cascade (`/tasks`) — both reach a quarantined entry, and it is the
+        same invariant either way. Caller must already know `entry`'s live
+        tier is `quarantined` before calling this."""
+        counterpart = _counterpart_for(task_text, lock, entry, session)
+        plan = select_mode(entry, counterpart=counterpart,
+                           read_only_bindings=set(settings.read_only_bindings),
+                           canary_opt_in=set(settings.canary_opt_in))
+        if plan.mode == "refuse":
+            return _refuse(invocation, session, created,
+                           f"{entry['id']} supervised invocation unavailable: "
+                           f"{plan.reason}")
+        return _dispatch_supervised(plan, entry, invocation, session, task_text,
+                                    lock, background, created, counterpart)
 
     @app.post("/tasks", response_class=HTMLResponse)
     def submit_task(request: Request, background: BackgroundTasks,
@@ -324,6 +520,13 @@ def create_app(
         else:
             if result.outcome == "invoke-agent":
                 agent_entry = result.agent_entry
+                # same invariant as the direct invoke route: a quarantined
+                # entry reached via the cascade still runs only supervised
+                records = load_records(settings.catalog_root)
+                tier = transitive_tier(records, agent_entry, lock, settings.model_profile)
+                if tier == "quarantined":
+                    return _dispatch_quarantined(agent_entry, invocation, session, task,
+                                                 lock, background, created)
                 tools = _resolve_bindings(lock, agent_entry)
                 if tools is None:
                     return _refuse(invocation, session, created,
@@ -409,10 +612,23 @@ def create_app(
 
     # -- invocation stream + detail ---------------------------------------------
 
+    def _authorize_invocation(request: Request, invocation) -> None:
+        # invoke-ui#9: an invocation id is low-enumerability but not access
+        # control — without this, any caller could read another user's
+        # trace, including a shadow invocation's real quarantined-agent
+        # output. Session-ownership or operator, same gate either endpoint.
+        if is_operator(request):
+            return
+        session, _ = get_session(request)
+        if invocation.session_id != session.session_id:
+            raise HTTPException(status_code=403, detail="not authorized for this invocation")
+
     @app.get("/invocations/{invocation_id}/stream")
     async def stream(invocation_id: str, request: Request):
-        if store.get_invocation(invocation_id) is None:
+        invocation = store.get_invocation(invocation_id)
+        if invocation is None:
             raise HTTPException(status_code=404)
+        _authorize_invocation(request, invocation)
         last = request.headers.get("Last-Event-ID") or request.query_params.get("last") or "0"
         try:
             seen = int(last)
@@ -439,10 +655,11 @@ def create_app(
         return EventSourceResponse(gen())
 
     @app.get("/invocations/{invocation_id}", response_class=HTMLResponse)
-    def invocation_detail(invocation_id: str):
+    def invocation_detail(invocation_id: str, request: Request):
         invocation = store.get_invocation(invocation_id)
         if invocation is None:
             raise HTTPException(status_code=404)
+        _authorize_invocation(request, invocation)
         events = store.events_after(invocation_id, 0)
         return page("invocation.html.j2", invocation=invocation, events=events)
 
@@ -488,14 +705,22 @@ def create_app(
         # tier + user authz checked here, live (recall pierces the pin)
         records = load_records(settings.catalog_root)
         tier = transitive_tier(records, entry, lock, settings.model_profile)
-        if tier not in allowed_tiers(session.user_sub, settings,
-                                     operator=is_operator(request)):
+        user_tiers = allowed_tiers(session.user_sub, settings,
+                                   operator=is_operator(request))
+        if tier not in user_tiers:
             store.queue_stale(entry["id"], f"tier:{tier}")
             err = StructuredError("STALE_ENTRY", f"{agent_id} refused at live tier {tier}")
             response = HTMLResponse(render_error(err), status_code=403)
             if created:
                 attach_cookie(response, session)
             return response
+        if tier == "quarantined":
+            # layer 8: quarantined agents run only in supervised mode. Only
+            # operators reach here — allowed_tiers() grants "quarantined" to
+            # operators alone, so a non-operator was already refused above.
+            invocation = store.create_invocation(session.session_id, agent_id)
+            return _dispatch_quarantined(entry, invocation, session, task, lock,
+                                         background, created)
         tools = _resolve_bindings(lock, entry)
         invocation = store.create_invocation(session.session_id, agent_id)
         if tools is None:
@@ -570,8 +795,13 @@ def create_app(
                                           encoding="utf-8")
 
     def _git_commit(paths, message: str) -> None:
-        subprocess.run(["git", "-C", str(settings.catalog_root), "add", "-A"],
-                       check=True, capture_output=True)
+        # stage exactly `paths` — never `-A`, which would sweep in whatever
+        # else is dirty in the checkout and make the promotion commit
+        # unauditable (CATALOG §8 step 7: atomic to the promotion, not the
+        # whole tree; certify/cli.py's _git_commit uses the same fix).
+        existing = [str(p) for p in paths if p.exists()]
+        subprocess.run(["git", "-C", str(settings.catalog_root), "add", "--",
+                        *existing], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(settings.catalog_root), "commit", "-q",
                         "-m", message], check=True, capture_output=True)
 
@@ -672,5 +902,113 @@ def create_app(
         logger.info("certify reject candidate_id=%s reason=%s", cid, reason)
         return HTMLResponse(
             f"<p class='banner'>rejected {cid}: {reason or 'no reason given'}</p>")
+
+    # -- canary review (meta screen — operator role, UI-PLANE §5) --------------
+
+    def _canary_key(agent_id: str, entry: dict | None, runs: list) -> tuple[str, str]:
+        # Prefer the live lock entry's version; fall back to the most recent
+        # run's recorded version/profile so the screen still renders a key
+        # once the entry has moved on (or isn't resolvable) but evidence exists.
+        if entry is not None:
+            return entry.get("version", ""), settings.model_profile
+        if runs:
+            # `runs` is ascending by run_id (supervised_runs' ordering) — the
+            # most recent run is the last element, not the first.
+            return runs[-1].entry_version, runs[-1].model_profile
+        return "", settings.model_profile
+
+    def _run_in_scope_or_404(agent_id: str, run_id: int):
+        """The ledger has no per-agent partitioning at the SQL level, so a
+        form-supplied `run_id` could name a row for any agent — guard the
+        adjudicate/void routes against closing (or leaking the existence of)
+        a run that doesn't belong to the `{agent_id}` named in the URL path."""
+        run = next((r for r in store.supervised_runs(agent_id) if r.run_id == run_id),
+                   None)
+        if run is None:
+            raise HTTPException(status_code=404, detail="no such run for this agent")
+        return run
+
+    @app.get("/canary/{agent_id}", response_class=HTMLResponse)
+    def canary_review(agent_id: str, request: Request, demoted: bool = False,
+                      _=Depends(require_operator)):
+        runs = store.supervised_runs(agent_id)
+        entry = entry_by_id(_current_lock(), agent_id)
+        streak = store.supervised_streak(agent_id, entry["version"],
+                                         settings.model_profile) if entry else 0
+        key_version, key_model_profile = _canary_key(agent_id, entry, runs)
+        return page("canary.html.j2", agent_id=agent_id, runs=runs, streak=streak,
+                    threshold=settings.supervision_threshold,
+                    eligible=streak >= settings.supervision_threshold,
+                    key_version=key_version, key_model_profile=key_model_profile,
+                    demoted=demoted)
+
+    @app.post("/canary/{agent_id}/adjudicate")
+    def canary_adjudicate(agent_id: str, request: Request, run_id: int = Form(...),
+                          verdict: str = Form(...), _=Depends(require_operator)):
+        if verdict not in {"clean", "incident"}:
+            raise HTTPException(status_code=400, detail="verdict must be clean|incident")
+        run = _run_in_scope_or_404(agent_id, run_id)
+        if run.verdict != "pending":
+            raise HTTPException(status_code=409, detail=f"run {run_id} is already {run.verdict}")
+        store.close_supervised_run(run_id, verdict=verdict,
+                                   adjudicated_by=user_sub(request))
+        return RedirectResponse(f"/canary/{agent_id}", status_code=303)
+
+    @app.post("/canary/{agent_id}/void")
+    def canary_void(agent_id: str, request: Request, run_id: int = Form(...),
+                    reason: str = Form(...), _=Depends(require_operator)):
+        # an incident may also be voided (ledger-mode#3): infra-attributable
+        # failures (tool-plane outage, timeout) auto-close as an incident
+        # before an operator ever sees them, and design §4's void escape
+        # hatch exists specifically to let an operator retract one of those.
+        run = _run_in_scope_or_404(agent_id, run_id)
+        if run.verdict not in {"pending", "incident"}:
+            raise HTTPException(status_code=409, detail=f"run {run_id} is already {run.verdict}")
+        store.close_supervised_run(run_id, verdict="void", reason=reason,
+                                   adjudicated_by=user_sub(request))
+        return RedirectResponse(f"/canary/{agent_id}", status_code=303)
+
+    def _record_trust_override(agent_id: str, version: str, model_profile: str,
+                               tier: str, granted_by: str, evidence: str) -> None:
+        """CATALOG §7: 'written only by certify (or recorded human override)'
+        — the demote action is that override. Append-only, same shape as a
+        certify-written record, atomic to its own commit (no lockbuild: recall
+        takes effect at routing time against the live trust.yaml, independent
+        of the lock — CATALOG §7)."""
+        trust_file = settings.catalog_root / "trust.yaml"
+        before = trust_file.read_text(encoding="utf-8") if trust_file.is_file() else None
+        trust = (_yaml.safe_load(before) if before else None) or {"records": []}
+        trust.setdefault("records", []).append({
+            "id": agent_id, "version": version, "model_profile": model_profile,
+            "tier": tier, "granted_by": granted_by, "evidence": evidence,
+        })
+        trust_file.write_text(_yaml.safe_dump(trust, sort_keys=True), encoding="utf-8")
+        try:
+            _git_commit([trust_file], f"recall: {agent_id}@{version} -> {tier} ({granted_by})")
+        except Exception:
+            if before is not None:
+                trust_file.write_text(before, encoding="utf-8")
+            else:
+                trust_file.unlink()
+            raise
+
+    @app.post("/canary/{agent_id}/demote")
+    def canary_demote(agent_id: str, request: Request, _=Depends(require_operator)):
+        # A real, operator-attributed routing-time recall (invoke-ui#3): the
+        # mechanism CATALOG §7 sanctions ("recorded human override") but that
+        # this route previously never used — it only wrote to stale_queue, a
+        # table nothing reads.
+        entry = entry_by_id(_current_lock(), agent_id)
+        runs = store.supervised_runs(agent_id)
+        version, model_profile = _canary_key(agent_id, entry, runs)
+        if not version:
+            raise HTTPException(
+                status_code=409,
+                detail=f"no resolvable version for {agent_id} — nothing to demote")
+        _record_trust_override(
+            agent_id, version, model_profile, "untrusted",
+            granted_by=f"operator-recall:{user_sub(request)}",
+            evidence="demoted via canary review screen")
+        return RedirectResponse(f"/canary/{agent_id}?demoted=1", status_code=303)
 
     return app

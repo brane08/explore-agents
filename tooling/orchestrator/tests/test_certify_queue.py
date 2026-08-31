@@ -30,6 +30,12 @@ def candidate(catalog_repo: Path, settings) -> str:
         "harnesses": [{"harness": HARNESS, "conformant": True,
                        "recorded_at": "2026-07-16T00:00:00+00:00"}],
     }), encoding="utf-8")
+    # `certify conformance --record` is its own step and commits its own
+    # output — the promotion commit stages only the paths it names (never
+    # `-A`, see certify/cli.py's _git_commit), so this must already be
+    # committed by the time promote runs, not swept in incidentally.
+    git(catalog_repo, "add", "conformance.yaml")
+    git(catalog_repo, "commit", "-q", "-m", "record conformance")
     ref = current_ref(catalog_repo)
     lock = load_lock_at(catalog_repo, ref)
     result = dispatch(build_inputs(TASK, CRITERIA, ref, lock, settings, HARNESS),

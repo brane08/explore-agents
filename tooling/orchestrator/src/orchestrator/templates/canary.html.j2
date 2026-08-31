@@ -1,0 +1,51 @@
+{% extends "base.html.j2" %}
+{% block body %}
+<h1>Canary review — {{ agent_id }}</h1>
+<p class="banner">
+  key: (version {{ key_version }}, model_profile {{ key_model_profile }}) —
+  streak {{ streak }} / threshold {{ threshold }} —
+  {% if eligible %}eligible for promotion{% else %}not eligible{% endif %}
+</p>
+
+{% if runs %}
+<table>
+  <tr><th>run_id</th><th>mode</th><th>verdict</th><th>reason</th>
+      <th>adjudicated_by</th><th>action</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td>{{ r.run_id }}</td>
+    <td>{{ r.mode }}</td>
+    <td>{{ r.verdict }}</td>
+    <td>{{ r.reason }}</td>
+    <td>{{ r.adjudicated_by or "" }}</td>
+    <td>
+      {% if r.verdict == "pending" %}
+      <form method="post" action="/canary/{{ agent_id }}/adjudicate" style="display:inline">
+        <input type="hidden" name="run_id" value="{{ r.run_id }}">
+        <button type="submit" name="verdict" value="clean">clean</button>
+        <button type="submit" name="verdict" value="incident">incident</button>
+      </form>
+      <form method="post" action="/canary/{{ agent_id }}/void" style="display:inline">
+        <input type="hidden" name="run_id" value="{{ r.run_id }}">
+        <input type="text" name="reason" placeholder="void reason" size="16">
+        <button type="submit">void</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>No supervised runs recorded for {{ agent_id }} yet.</p>
+{% endif %}
+
+{% if demoted %}
+<p class="banner">demotion requested — queued for the certify demotion path; trust.yaml is unchanged by this screen.</p>
+{% endif %}
+
+<form method="post" action="/canary/{{ agent_id }}/demote">
+  <button type="submit">Request demotion (run certify demotion to act on it)</button>
+</form>
+
+<p><a href="/agents/{{ agent_id }}">back to agent</a></p>
+{% endblock %}

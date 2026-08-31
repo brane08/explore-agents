@@ -38,8 +38,19 @@ def run_invocation(
     tools: list[dict],
     invoke_tool: ToolInvoker,
     scorer: Scorer,
-) -> tuple[bool, str]:
-    """Execute a (stub-profile) agent run; returns (ok, result summary).
+    supervised: bool = False,
+) -> tuple[bool, str, dict]:
+    """Execute a (stub-profile) agent run; returns (ok, result summary, result).
+
+    `result` is the raw structured dict returned by the tool (or `{"error":
+    ...}` on failure) — shadow-mode comparison (supervise.compare_outputs)
+    diffs this, not the truncated string summary, which exists only for the
+    trace/terminal event.
+
+    `supervised` marks a run dispatched under layer 8 supervision (shadow or
+    canary) — it never gates behaviour here, it only makes the run observable
+    in the trace; the caller (webapp's `_dispatch_supervised`) is what
+    actually enforces "quarantined agents run only in supervised mode".
 
     The caller emits the `terminal` event — anything that must appear in the
     trace (e.g. the B1 registration routing event) happens before terminal,
@@ -51,6 +62,7 @@ def run_invocation(
         "version": agent_version,
         "model_profile": model_profile,
         "catalog_ref": catalog_ref,
+        "supervised": supervised,
     })
 
     t0 = time.monotonic()
@@ -66,7 +78,7 @@ def run_invocation(
                   "elapsed_ms": int((time.monotonic() - t0) * 1000)})
 
     if chosen is None:
-        return False, "no tools bound"
+        return False, "no tools bound", {"error": "no tools bound"}
 
     t1 = time.monotonic()
     emit("node", {"node": "act", "status": "enter", "elapsed_ms": 0})
@@ -84,4 +96,4 @@ def run_invocation(
         ok = False
     emit("node", {"node": "act", "status": "exit",
                   "elapsed_ms": int((time.monotonic() - t1) * 1000)})
-    return ok, _summary(result, 2000)
+    return ok, _summary(result, 2000), result

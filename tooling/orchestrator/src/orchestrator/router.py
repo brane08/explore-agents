@@ -66,6 +66,7 @@ def route(
     settings: Settings,
     store: Store,
     operator: bool = False,
+    record_side_effects: bool = True,
 ) -> RoutingResult:
     events: list[RoutingEvent] = []
     records = load_records(catalog_root)
@@ -89,7 +90,8 @@ def route(
             break
         if entry.get("stale"):
             # refused, queued for rebase/eval-rerun; try the next candidate
-            store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
+            if record_side_effects:
+                store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
             events.append(RoutingEvent(
                 "agent-match", entry["id"],
                 note=f"STALE_ENTRY {entry['id']} {entry.get('stale_reason', '')}".strip(),
@@ -104,7 +106,8 @@ def route(
             tier = transitive_tier(records, entry, lock, settings.model_profile)
             if tier not in user_tiers:
                 # live (recalled or insufficient) tier — refuse, no fallback
-                store.queue_stale(entry["id"], f"tier:{tier}")
+                if record_side_effects:
+                    store.queue_stale(entry["id"], f"tier:{tier}")
                 err = StructuredError("STALE_ENTRY", f"{entry['id']} refused at live tier {tier}")
                 events.append(RoutingEvent("refused", entry["id"], note=err.context))
                 return RoutingResult("error", events, error=err)
@@ -112,6 +115,15 @@ def route(
         break  # confirmation below threshold → treated as no-match; cascade continues
 
     # --- 2. template match (no templates until Phase 3) ----------------------
+    # computed, not asserted: a template entry landing in the lock before the
+    # route side is built here would otherwise be silently skipped, in
+    # violation of "cascade order respected" — this makes that skip loud.
+    templates = list(entries_by_kind(lock, "template"))
+    if templates:
+        raise NotImplementedError(
+            f"{len(templates)} template entr{'y' if len(templates) == 1 else 'ies'} "
+            "in the lock, but template-match routing is not built (Phase 3) — "
+            "falling through would silently bypass them")
     events.append(RoutingEvent("template-match", note="no template entries"))
 
     # --- 3. B1 tool coverage --------------------------------------------------
@@ -119,7 +131,8 @@ def route(
     candidates: list[tuple[dict, str]] = []
     for entry in entries_by_kind(lock, "skill", "mcp-tool"):
         if entry.get("stale"):
-            store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
+            if record_side_effects:
+                store.queue_stale(entry["id"], entry.get("stale_reason", "stale"))
             events.append(RoutingEvent(
                 "b1-coverage", entry["id"],
                 note=f"STALE_ENTRY {entry['id']} {entry.get('stale_reason', '')}".strip(),
@@ -133,8 +146,21 @@ def route(
     scores = scorer.batch(task_text, [text for _, text in candidates])
     for (entry, _), score in zip(candidates, scores):
         live = transitive_tier(records, entry, lock, settings.model_profile)
+        # hardcoded "validated", not user_tiers: layer 4 [M] requires every
+        # assembled B1 tool be validated regardless of who is asking — an
+        # operator must not be able to assemble a quarantined tool.
         if score >= settings.coverage_threshold and live == "validated":
             tools.append((score, entry))
+        elif score >= settings.coverage_threshold:
+            # recall-driven coverage loss, not a pattern gap — report and
+            # queue it the same way the agent-match tier refusal does
+            # (router.py above), so it doesn't fall through as
+            # PATTERN_UNRECOGNIZED and trigger duplicate B2 generation.
+            if record_side_effects:
+                store.queue_stale(entry["id"], f"tier:{live}")
+            events.append(RoutingEvent(
+                "b1-coverage", entry["id"],
+                note=f"STALE_ENTRY {entry['id']} refused at live tier {live}"))
     if tools:
         tools.sort(key=lambda t: (-t[0], t[1]["id"]))
         chosen = [e for _, e in tools]
@@ -144,7 +170,8 @@ def route(
 
     # --- 4. residual gap --------------------------------------------------------
     residual = normalize_residual(task_text)
-    store.record_error("PATTERN_UNRECOGNIZED", residual)
+    if record_side_effects:
+        store.record_error("PATTERN_UNRECOGNIZED", residual)
     err = StructuredError("PATTERN_UNRECOGNIZED", residual)
     events.append(RoutingEvent("unrecognized", note=residual))
     return RoutingResult("error", events, error=err)
