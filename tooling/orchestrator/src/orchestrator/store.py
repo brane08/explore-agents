@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS stale_queue (
     reason   TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS supervised_run (
+    run_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id       TEXT NOT NULL,
+    entry_version  TEXT NOT NULL,
+    model_profile  TEXT NOT NULL,
+    invocation_id  TEXT NOT NULL,
+    mode           TEXT NOT NULL,
+    verdict        TEXT NOT NULL DEFAULT 'pending',
+    reason         TEXT NOT NULL DEFAULT '',
+    counterpart_id TEXT,
+    adjudicated_by TEXT,
+    adjudicated_at TEXT,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 """
 
 
@@ -77,6 +91,20 @@ class TraceEvent:
     data: dict
 
 
+@dataclass
+class SupervisedRun:
+    run_id: int
+    entry_id: str
+    entry_version: str
+    model_profile: str
+    invocation_id: str
+    mode: str
+    verdict: str
+    reason: str
+    counterpart_id: str | None
+    adjudicated_by: str | None
+
+
 class Store(Protocol):
     def create_session(self, user_sub: str, catalog_ref: str) -> Session: ...
     def get_session(self, session_id: str) -> Session | None: ...
@@ -90,6 +118,15 @@ class Store(Protocol):
     def error_records(self) -> list[tuple[str, str]]: ...
     def queue_stale(self, entry_id: str, reason: str) -> None: ...
     def stale_queue(self) -> list[tuple[str, str]]: ...
+    def open_supervised_run(self, *, entry_id: str, entry_version: str,
+                            model_profile: str, invocation_id: str, mode: str,
+                            counterpart_id: str | None = None) -> int: ...
+    def close_supervised_run(self, run_id: int, *, verdict: str, reason: str = "",
+                             adjudicated_by: str | None = None) -> None: ...
+    def supervised_streak(self, entry_id: str, entry_version: str,
+                          model_profile: str) -> int: ...
+    def supervised_runs(self, entry_id: str) -> list[SupervisedRun]: ...
+    def pending_supervised_runs(self) -> list[SupervisedRun]: ...
 
 
 class SQLiteStore:
@@ -194,3 +231,74 @@ class SQLiteStore:
 
     def stale_queue(self) -> list[tuple[str, str]]:
         return self._query("SELECT entry_id, reason FROM stale_queue ORDER BY id")
+
+    # -- supervised runs -------------------------------------------------------
+
+    _RUN_COLS = ("run_id, entry_id, entry_version, model_profile, invocation_id, "
+                 "mode, verdict, reason, counterpart_id, adjudicated_by")
+
+    def open_supervised_run(self, *, entry_id: str, entry_version: str,
+                            model_profile: str, invocation_id: str, mode: str,
+                            counterpart_id: str | None = None) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO supervised_run (entry_id, entry_version, model_profile,"
+                " invocation_id, mode, counterpart_id) VALUES (?,?,?,?,?,?)",
+                (entry_id, entry_version, model_profile, invocation_id, mode,
+                 counterpart_id),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def close_supervised_run(self, run_id: int, *, verdict: str, reason: str = "",
+                             adjudicated_by: str | None = None) -> None:
+        if verdict not in {"clean", "incident", "void"}:
+            raise ValueError(f"cannot close a run as {verdict!r}")
+        rows = self._query(
+            "SELECT verdict FROM supervised_run WHERE run_id=?", (run_id,))
+        if not rows:
+            raise ValueError(f"no supervised run {run_id!r}")
+        current = rows[0][0]
+        # an incident may still be voided — design §4's operator escape
+        # hatch is meant for infrastructure-attributable failures, and those
+        # close synchronously as an incident before an operator ever sees
+        # them; every other transition still requires a pending row.
+        allowed = {"pending", "incident"} if verdict == "void" else {"pending"}
+        if current not in allowed:
+            raise ValueError(
+                f"supervised run {run_id!r} is already {current!r}, not pending")
+        self._write(
+            "UPDATE supervised_run SET verdict=?, reason=?, adjudicated_by=?,"
+            " adjudicated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE run_id=?",
+            (verdict, reason, adjudicated_by, run_id),
+        )
+
+    def supervised_streak(self, entry_id: str, entry_version: str,
+                          model_profile: str) -> int:
+        # Voided and still-pending runs did not measure the agent: they neither
+        # extend the streak nor break it, so they are filtered out before the
+        # consecutive-clean count rather than treated as a gap.
+        rows = self._query(
+            "SELECT verdict FROM supervised_run WHERE entry_id=? AND entry_version=?"
+            " AND model_profile=? AND verdict IN ('clean','incident')"
+            " ORDER BY run_id DESC",
+            (entry_id, entry_version, model_profile),
+        )
+        streak = 0
+        for (verdict,) in rows:
+            if verdict != "clean":
+                break
+            streak += 1
+        return streak
+
+    def supervised_runs(self, entry_id: str) -> list[SupervisedRun]:
+        rows = self._query(
+            f"SELECT {self._RUN_COLS} FROM supervised_run WHERE entry_id=?"
+            " ORDER BY run_id", (entry_id,))
+        return [SupervisedRun(*r) for r in rows]
+
+    def pending_supervised_runs(self) -> list[SupervisedRun]:
+        rows = self._query(
+            f"SELECT {self._RUN_COLS} FROM supervised_run WHERE verdict='pending'"
+            " ORDER BY run_id")
+        return [SupervisedRun(*r) for r in rows]

@@ -74,6 +74,37 @@ def test_invocation_detail_replays_closed_trace(client, store):
         assert f'data-type="{etype}"' in r.text
 
 
+def test_invocation_detail_and_stream_refuse_a_different_users_session(client, store):
+    """invoke-ui#9: an invocation id is low-enumerability but not access
+    control — a caller with no session, or a different user's session, must
+    not be able to read another user's trace via either endpoint."""
+    client.get("/")
+    client.post("/tasks", data={"task": TASK})
+    iid = last_invocation(store, client)
+
+    from fastapi.testclient import TestClient
+    other = TestClient(client.app)                       # no cookie at all
+    r = other.get(f"/invocations/{iid}")
+    assert r.status_code == 403
+    r = other.get(f"/invocations/{iid}/stream")
+    assert r.status_code == 403
+
+    other.get("/", headers={"X-Forwarded-User": "someone-else@example.com"})
+    r = other.get(f"/invocations/{iid}")
+    assert r.status_code == 403
+
+
+def test_operator_may_read_any_users_invocation(client, store):
+    client.get("/")
+    client.post("/tasks", data={"task": TASK})
+    iid = last_invocation(store, client)
+
+    from fastapi.testclient import TestClient
+    op = TestClient(client.app)
+    r = op.get(f"/invocations/{iid}", headers={"X-Forwarded-Roles": "operator"})
+    assert r.status_code == 200
+
+
 def test_meta_screens_gated_by_operator_role(client):
     client.get("/")
     assert client.get("/agents").status_code == 403

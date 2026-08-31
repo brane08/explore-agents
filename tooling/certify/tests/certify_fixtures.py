@@ -313,3 +313,19 @@ def improviser_harness(inputs: HarnessInputs, out: Path) -> HarnessOutcome:
     """Improvises around a missing input instead of stopping."""
     write_candidate(out, inputs, criteria_text="BC-1: do something sensible.")
     return HarnessOutcome("COMPLETE", [], turns_used=5)
+
+
+@pytest.fixture
+def tmp_catalog(tmp_path: Path) -> Path:
+    """Create a temp dir with a minimal trust.yaml for supervised-run tests."""
+    trust_yaml = tmp_path / "trust.yaml"
+    trust_yaml.write_text(yaml.safe_dump({
+        "records": [{
+            "id": "cron-next-fire-times",
+            "version": "0.1.0",
+            "model_profile": "stub-class-ref",
+            "tier": "quarantined",
+            "granted_by": "certify-test"
+        }]
+    }, sort_keys=True), encoding="utf-8")
+    return tmp_path
