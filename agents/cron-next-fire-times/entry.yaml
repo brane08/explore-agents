@@ -15,5 +15,7 @@ model_requirements:
   structured_output: true
   tool_use: false
 routing_summary: Given a cron expression and a start timestamp, the agent returns
-  the next five fire
+  the next five fire times of that schedule, expressed in UTC. The start timestamp
+  is normalised to UTC (a naive timestamp is read as UTC, an offset-bearing one is
+  converted); fire times are strictly after it, ascending, at minute granularity.
 version: 0.1.0
