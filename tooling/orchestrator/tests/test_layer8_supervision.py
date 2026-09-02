@@ -435,6 +435,39 @@ def test_shadow_output_is_never_returned_to_the_caller(supervised_client, superv
     assert supervised_store.supervised_runs("quarantined-agent")[0].mode == "shadow"
 
 
+def test_shadow_trace_is_not_readable_by_the_caller_who_triggered_it(
+        supervised_client, supervised_store):
+    """Layer 8 [M] "outputs of shadow runs never returned to callers".
+
+    The response body check above is necessary but not sufficient: the shadow
+    run executes on an invocation created under the *caller's own* session, so
+    ownership-based authorization would hand the quarantined agent's real
+    output straight back through the trace endpoints. A shadow trace belongs
+    to the supervision surface — operator only, whoever triggered it.
+    """
+    caller = TestClient(supervised_client.app)
+    caller.headers.update({"X-Forwarded-User": "not-an-operator@example.com"})
+    caller.get("/")                                   # establishes its session
+
+    # a shadow run on an invocation this very caller owns
+    session_id = supervised_store._query(
+        "SELECT session_id FROM session ORDER BY rowid DESC LIMIT 1")[0][0]
+    own = supervised_store.create_invocation(session_id, "quarantined-agent")
+    supervised_store.open_supervised_run(
+        entry_id="quarantined-agent", entry_version="0.1.0",
+        model_profile="default", invocation_id=own.invocation_id,
+        mode="shadow", counterpart_id="counterpart-agent")
+
+    assert caller.get(f"/invocations/{own.invocation_id}").status_code == 403
+    assert caller.get(f"/invocations/{own.invocation_id}/stream").status_code == 403
+
+    # the operator supervision surface still reaches it
+    op = TestClient(supervised_client.app)
+    op.headers.update({"X-Forwarded-User": "someone@example.com",
+                       "X-Forwarded-Roles": "operator"})
+    assert op.get(f"/invocations/{own.invocation_id}").status_code == 200
+
+
 def test_shadow_reaches_clean_when_structured_outputs_match(
         supervised_client, supervised_store, monkeypatch):
     """Fix 1: shadow comparison must diff the real structured result
@@ -740,6 +773,47 @@ def test_demote_writes_a_real_operator_attributed_recall(streak_client, streak_s
     assert "recall" in last and "cron-next-fire-times" in last
     porcelain = git(streak_settings.catalog_root, "status", "--porcelain")
     assert porcelain == "", f"demote must leave a clean tree, got: {porcelain}"
+
+
+def test_demote_screen_states_that_trust_yaml_was_written(streak_client):
+    """The banner and button must describe what the route actually does.
+
+    The copy predates the fix that turned demote into a real recall, and it
+    still told the operator `trust.yaml is unchanged by this screen` while the
+    handler committed an irreversible recall — the operator instrument
+    misreporting the instrument's own effect.
+    """
+    response = streak_client.post(
+        "/canary/cron-next-fire-times/demote", follow_redirects=False)
+    body = streak_client.get(response.headers["location"]).text.lower()
+
+    assert "trust.yaml is unchanged" not in body
+    assert "queued" not in body
+    assert "run certify demotion to act on it" not in body
+    # states the effect: a recorded, committed recall that routing sees now
+    assert "recall" in body and "trust.yaml" in body
+
+
+def test_an_incident_row_offers_the_void_escape_hatch_in_the_ui(
+        streak_client, streak_store):
+    """close_supervised_run permits `incident -> void` so an operator can
+    retract an infra-attributable failure that auto-closed before anyone saw
+    it. The screen only rendered the void form for `pending` rows, leaving
+    that escape hatch reachable by the backend but not by the operator.
+    """
+    rid = streak_store.open_supervised_run(**KEY, invocation_id="i-inc", mode="canary")
+    streak_store.close_supervised_run(rid, verdict="incident", reason="tool-plane outage")
+
+    body = streak_client.get("/canary/cron-next-fire-times").text
+
+    assert f'value="{rid}"' in body
+    assert "/void" in body
+    # the un-voidable verdicts must still offer no form
+    rid2 = streak_store.open_supervised_run(**KEY, invocation_id="i-clean", mode="canary")
+    streak_store.close_supervised_run(rid2, verdict="clean")
+    row = [ln for ln in streak_client.get("/canary/cron-next-fire-times").text.splitlines()
+           if f'<td>{rid2}</td>' in ln or f'value="{rid2}"' in ln]
+    assert not any("/void" in ln for ln in row)
 
 
 def test_screen_shows_the_streak_and_whether_the_key_is_eligible(
