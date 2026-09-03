@@ -127,6 +127,7 @@ class Store(Protocol):
                           model_profile: str) -> int: ...
     def supervised_runs(self, entry_id: str) -> list[SupervisedRun]: ...
     def pending_supervised_runs(self) -> list[SupervisedRun]: ...
+    def is_shadow_invocation(self, invocation_id: str) -> bool: ...
 
 
 class SQLiteStore:
@@ -302,3 +303,12 @@ class SQLiteStore:
             f"SELECT {self._RUN_COLS} FROM supervised_run WHERE verdict='pending'"
             " ORDER BY run_id")
         return [SupervisedRun(*r) for r in rows]
+
+    def is_shadow_invocation(self, invocation_id: str) -> bool:
+        """A shadow run's trace carries the quarantined agent's real output,
+        which CATALOG §7 forbids returning to the caller — and the run executes
+        on an invocation owned by that caller's own session, so ownership alone
+        cannot gate it."""
+        return bool(self._query(
+            "SELECT 1 FROM supervised_run WHERE invocation_id=? AND mode='shadow'"
+            " LIMIT 1", (invocation_id,)))

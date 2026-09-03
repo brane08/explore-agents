@@ -25,6 +25,10 @@
         <button type="submit" name="verdict" value="clean">clean</button>
         <button type="submit" name="verdict" value="incident">incident</button>
       </form>
+      {% endif %}
+      {# an incident stays voidable: infra-attributable failures auto-close
+         before an operator sees them, and void is the retraction path. #}
+      {% if r.verdict in ("pending", "incident") %}
       <form method="post" action="/canary/{{ agent_id }}/void" style="display:inline">
         <input type="hidden" name="run_id" value="{{ r.run_id }}">
         <input type="text" name="reason" placeholder="void reason" size="16">
@@ -40,11 +44,13 @@
 {% endif %}
 
 {% if demoted %}
-<p class="banner">demotion requested — queued for the certify demotion path; trust.yaml is unchanged by this screen.</p>
+<p class="banner">recall recorded — an <code>untrusted</code> override was appended to
+trust.yaml and committed. Routing refuses this agent from the next invocation
+onward; no lock rebuild is needed.</p>
 {% endif %}
 
 <form method="post" action="/canary/{{ agent_id }}/demote">
-  <button type="submit">Request demotion (run certify demotion to act on it)</button>
+  <button type="submit">Demote to untrusted (writes trust.yaml, effective immediately)</button>
 </form>
 
 <p><a href="/agents/{{ agent_id }}">back to agent</a></p>

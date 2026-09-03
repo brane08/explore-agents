@@ -619,6 +619,12 @@ def create_app(
         # output. Session-ownership or operator, same gate either endpoint.
         if is_operator(request):
             return
+        # A shadow trace is supervision evidence, not the caller's result:
+        # it holds the quarantined agent's real output, which CATALOG §7 says
+        # is never returned to the caller. It runs on an invocation the caller
+        # owns, so ownership cannot gate it — operator only, whoever asked.
+        if store.is_shadow_invocation(invocation.invocation_id):
+            raise HTTPException(status_code=403, detail="shadow trace is operator-only")
         session, _ = get_session(request)
         if invocation.session_id != session.session_id:
             raise HTTPException(status_code=403, detail="not authorized for this invocation")
